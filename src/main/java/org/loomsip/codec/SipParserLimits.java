@@ -3,6 +3,18 @@ package org.loomsip.codec;
 /**
  * Resource limits applied before a parsed SIP message reaches higher layers.
  *
+ * <p>These limits belong to the SIP codec and apply to untrusted inbound
+ * messages from every transport, including UDP, TCP, TLS, and WebSocket. They
+ * are not UDP-specific. A transport may impose an additional outer limit, such
+ * as a maximum UDP datagram size, TCP cumulation size, or WebSocket frame size.</p>
+ *
+ * <p>Stream transports must enforce the same limits incrementally while
+ * locating the header delimiter and waiting for the body. This prevents an
+ * oversized start-line, an unterminated header section, or a declared body
+ * length from growing the cumulation buffer before a complete message can be
+ * passed to {@link SipMessageParser}. The parser then applies the limits again
+ * when validating the complete framed message.</p>
+ *
  * @param maxStartLineBytes maximum encoded start-line length, excluding CRLF
  * @param maxHeaderBytes maximum encoded header section length
  * @param maxBodyBytes maximum binary body length; may be zero
