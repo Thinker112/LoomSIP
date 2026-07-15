@@ -10,10 +10,29 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
+/**
+ * Encodes immutable SIP messages into complete wire-format byte arrays.
+ *
+ * <p>The encoder emits CRLF line endings and replaces all supplied
+ * {@code Content-Length} fields with one value calculated from the binary body.</p>
+ */
 public final class SipMessageEncoder {
 
     private static final byte[] CRLF = {'\r', '\n'};
 
+    /**
+     * Creates a stateless message encoder.
+     */
+    public SipMessageEncoder() {
+    }
+
+    /**
+     * Encodes one complete SIP request or response.
+     *
+     * @param message immutable message to encode
+     * @return newly allocated wire-format bytes
+     * @throws NullPointerException if {@code message} is {@code null}
+     */
     public byte[] encode(SipMessage message) {
         Objects.requireNonNull(message, "message");
 

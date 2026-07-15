@@ -18,6 +18,14 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Parses one complete, already framed SIP message with configurable size limits.
+ *
+ * <p>The parser does not perform TCP stream reassembly. When a
+ * {@code Content-Length} field is present, the supplied byte array must contain
+ * exactly that many body bytes. Without the field, all bytes after the header
+ * delimiter are treated as the body.</p>
+ */
 public final class SipMessageParser {
 
     private static final byte CR = '\r';
@@ -25,14 +33,32 @@ public final class SipMessageParser {
 
     private final SipParserLimits limits;
 
+    /**
+     * Creates a parser using {@link SipParserLimits#DEFAULT}.
+     */
     public SipMessageParser() {
         this(SipParserLimits.DEFAULT);
     }
 
+    /**
+     * Creates a parser with explicit resource limits.
+     *
+     * @param limits start-line, header, and body limits
+     * @throws NullPointerException if {@code limits} is {@code null}
+     */
     public SipMessageParser(SipParserLimits limits) {
         this.limits = Objects.requireNonNull(limits, "limits");
     }
 
+    /**
+     * Parses one complete SIP message.
+     *
+     * @param data complete wire-format message bytes
+     * @return immutable request or response
+     * @throws NullPointerException if {@code data} is {@code null}
+     * @throws SipParseException if framing, UTF-8 text, syntax, limits, or body
+     *                           length validation fails
+     */
     public SipMessage parse(byte[] data) throws SipParseException {
         Objects.requireNonNull(data, "data");
 
