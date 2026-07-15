@@ -1,15 +1,166 @@
-运用现代 Java21 重写一个 SIP（Session Initiation Protocol）协议栈
-网络传输层： Netty
-并发与线程模型： Java 21 虚拟线程（Virtual Threads / Project Loom）。摆脱传统线程池限制，一个连接/一个会话（Dialog）一个虚拟线程，极大地简化异步状态机编写。
+# LoomSIP
 
-SIP 栈应该遵循 RFC 3261 标准的分层设计，但要用现代响应式的方式去解耦：
+LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协议栈，目标是遵循 RFC 3261 的协议分层与事务语义，并通过 Netty 和 Java 虚拟线程建立清晰、可测试的并发模型。
 
+项目当前处于早期开发阶段。仓库已实现不可变 SIP 消息模型以及基础 Parser/Encoder；UDP/TCP/TLS 传输、Transaction、Dialog 和完整 Stack API 仍在后续规划中，暂不适合生产环境使用。
+
+## 设计目标
+
+- 遵循 RFC 3261 的分层结构和事务状态机语义。
+- 使用 Netty 承载 UDP、TCP 和 TLS 网络 I/O。
+- 使用 Java 21 虚拟线程执行协议处理和上层业务回调。
+- 解耦网络传输、消息编解码、Transaction、Dialog 和业务层。
+- 保持 SIP 核心模型不可变，不向上层暴露 Netty `ByteBuf`。
+- 优先保证协议正确性、资源所有权清晰、可测试性和可维护性。
+- 核心层不强制引入 Reactor 等响应式框架。
+
+## 当前进度
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| SIP 消息模型 | 已实现 | Request、Response、URI、Method、Header、Body 等不可变模型 |
+| SIP Parser | 已实现 | 支持完整报文、重复/紧凑/未知 Header、扩展 Method、折行与二进制 Body |
+| SIP Encoder | 已实现 | 输出规范 CRLF 报文，并根据 Body 修正 `Content-Length` |
+| Parser 资源限制 | 已实现 | 可限制 start-line、Header 区和 Body 大小 |
+| Netty UDP Transport | 规划中 | 下一里程碑，完成 OPTIONS/`200 OK` UDP 收发闭环 |
+| Transaction Layer | 规划中 | ICT、IST、NICT、NIST 状态机、重传与 Timer |
+| Dialog Layer | 规划中 | Dialog 生命周期、Route Set、Remote Target 与 CSeq 管理 |
+| TCP/TLS Transport | 规划中 | 流式分帧、连接复用和 TLS 会话管理 |
+
+当前 Parser 接收一条已经完成边界识别的 SIP 报文。TCP 半包、粘包以及同一字节流中的多条消息，将由后续 Transport stream decoder 负责分帧。
+
+## 目标架构
+
+```text
 +-------------------------------------------------------+
-|          TU (Transaction User) - 应用层 / 业务逻辑       |
+|       TU (Transaction User) - 应用层 / 业务逻辑       |
 +-------------------------------------------------------+
-|     Dialog Layer (会话层) - 维护 Call, Tag, Seq 状态  |
+|       Dialog Layer - Call-ID、Tag、CSeq、Route Set    |
 +-------------------------------------------------------+
-|  Transaction Layer (事务层) - 维护 ICT/IST/NICT/NIST 状态机 |
+| Transaction Layer - ICT / IST / NICT / NIST 状态机   |
 +-------------------------------------------------------+
-|   Transport Layer (传输层) - Netty (UDP, TCP, TLS)    |
+|       Message Codec - SIP 消息解析与编码              |
 +-------------------------------------------------------+
+|       Transport Layer - Netty UDP / TCP / TLS         |
++-------------------------------------------------------+
+```
+
+- **Transport Layer**：管理监听端口、连接、收发、TCP/TLS 分帧与传输失败通知。
+- **Message Codec**：在网络字节与不可变 SIP 消息之间转换。
+- **Transaction Layer**：实现客户端/服务端事务状态机、重传和超时。
+- **Dialog Layer**：维护 Dialog 生命周期、Route Set、Remote Target 和 CSeq。
+- **TU**：承载 UAC、UAS、Registrar、Proxy 或其他业务逻辑。
+
+## 并发模型
+
+LoomSIP 的基本原则是：Netty 负责高效 I/O，虚拟线程负责易于理解的顺序化协议逻辑。
+
+```text
+Netty EventLoop ----+
+                    |
+Timer Callback -----+--> Transaction/Dialog Mailbox --> Virtual Thread --> State Machine
+                    |
+TU / Application ---+
+```
+
+- Netty EventLoop 只执行 I/O、分帧、编解码和快速派发，不执行业务逻辑或阻塞操作。
+- 同一个 Transaction 和同一个 Dialog 内部的事件必须严格串行处理。
+- 不同 Transaction 或 Dialog 之间可以并发执行。
+- Mailbox 是组件专属的 FIFO 队列，仅在收到事件时按需启动虚拟线程，不长期占用线程。
+- Timer 回调只投递状态机事件，不直接修改 Transaction 或 Dialog 状态。
+- 上层可以使用阻塞式 API，但阻塞发生在虚拟线程而非 Netty EventLoop。
+
+## 环境要求
+
+- JDK 21
+- Maven
+
+确认环境并运行测试：
+
+```shell
+java -version
+mvn -version
+mvn test
+```
+
+构建项目：
+
+```shell
+mvn clean package
+```
+
+项目尚未发布到公共 Maven 仓库。当前应从源码构建和使用。
+
+## Codec 示例
+
+下面的示例解析一条完整的 SIP OPTIONS 请求，再将消息编码回网络字节：
+
+```java
+import org.loomsip.codec.SipMessageEncoder;
+import org.loomsip.codec.SipMessageParser;
+import org.loomsip.message.SipMessage;
+
+import java.nio.charset.StandardCharsets;
+
+String wireMessage =
+        "OPTIONS sip:service@example.com SIP/2.0\r\n" +
+        "Via: SIP/2.0/UDP client.example.com;branch=z9hG4bK-1234\r\n" +
+        "From: <sip:alice@example.com>;tag=alice-1\r\n" +
+        "To: <sip:service@example.com>\r\n" +
+        "Call-ID: call-1234@example.com\r\n" +
+        "CSeq: 1 OPTIONS\r\n" +
+        "Max-Forwards: 70\r\n" +
+        "Content-Length: 0\r\n" +
+        "\r\n";
+
+SipMessageParser parser = new SipMessageParser();
+SipMessage message = parser.parse(wireMessage.getBytes(StandardCharsets.UTF_8));
+
+SipMessageEncoder encoder = new SipMessageEncoder();
+byte[] encoded = encoder.encode(message);
+```
+
+消息模型保留 Header 的原始顺序和重复项；Header 查询不区分大小写，并将 `v`/`Via`、`f`/`From` 等 RFC 3261 紧凑名称视为等价。Body 始终按二进制数据处理，Encoder 会根据实际字节数生成唯一且正确的 `Content-Length`。
+
+## 代码组织
+
+当前采用单 Maven module，通过 package 明确边界：
+
+```text
+org.loomsip
+  message       Request、Response、URI、Header、Body 等模型
+  codec         SIP Parser、Encoder 和解析资源限制
+```
+
+随着里程碑推进，计划增加：
+
+```text
+org.loomsip
+  api           面向上层业务的公共 API
+  transport     UDP、TCP、TLS 传输及连接管理
+  transaction   SIP 事务、状态机和事务仓库
+  dialog        Dialog 模型、状态管理和仓库
+  concurrent    Mailbox、调度和事件派发
+  stack         配置、组件装配和生命周期管理
+```
+
+接口稳定后，再评估拆分为 `loomsip-core`、`loomsip-transport-netty`、`loomsip-testkit` 和 `loomsip-examples` 等独立 module。
+
+## 路线图
+
+1. **协议基础**：消息模型、Parser、Encoder、UDP Transport 和 Stack 生命周期。
+2. **事务层**：Transaction ID、Mailbox、Dispatcher、四类状态机、Timer、ACK/CANCEL 关联规则。
+3. **Dialog 与基本呼叫**：Early/Confirmed Dialog，以及 INVITE、ACK、BYE、CANCEL 完整流程。
+4. **可靠传输与安全**：TCP 分帧、连接复用、TLS、资源限制和 Digest Authentication。
+5. **扩展能力**：RFC 3263 DNS、WebSocket、测试工具、指标、追踪和诊断能力。
+
+## 文档
+
+- [ARCHITECTURE.md](ARCHITECTURE.md)：总体分层、并发模型、协议边界与完整实施路线。
+- [MILESTONE-01-MESSAGE-CODEC.md](MILESTONE-01-MESSAGE-CODEC.md)：消息模型与 Codec 的实现范围和验收标准。
+- [MILESTONE-02-NETTY-UDP-TRANSPORT.md](MILESTONE-02-NETTY-UDP-TRANSPORT.md)：Netty UDP Transport 的详细设计。
+- [CONTRIBUTING.md](CONTRIBUTING.md)：开发约定与公共 API Javadoc 要求。
+
+## 贡献约定
+
+提交代码前请运行 `mvn test`。新增或修改公共 API 时，应明确不可变性、数据所有权、线程与回调规则、参数约束、异常语义和生命周期限制，并为公共或受保护类型及成员补充契约型 Javadoc。
