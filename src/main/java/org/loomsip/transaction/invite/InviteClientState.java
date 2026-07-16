@@ -8,6 +8,8 @@ public enum InviteClientState {
     CALLING,
     /** At least one provisional response received. */
     PROCEEDING,
+    /** A 2xx response was received and additional matching 2xx responses remain deliverable. */
+    ACCEPTED,
     /** Non-2xx final response received and ACK generated. */
     COMPLETED,
     /** No longer processing events. */

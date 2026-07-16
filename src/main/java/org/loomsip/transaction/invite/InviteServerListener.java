@@ -17,6 +17,19 @@ public interface InviteServerListener {
     void onInvite(InviteServerHandle transaction, SipRequest request, TransportContext context);
 
     /**
+     * Reports a matched CANCEL while the original INVITE is still Proceeding.
+     *
+     * <p>The TU normally answers the INVITE with 487. The CANCEL transaction's
+     * own 200/481 response is managed separately by {@link CancelCoordinator}.</p>
+     *
+     * @param transaction related IST
+     * @param cancel matched CANCEL request
+     * @param context CANCEL network metadata
+     */
+    default void onCancel(InviteServerHandle transaction, SipRequest cancel, TransportContext context) {
+    }
+
+    /**
      * Delivers the first ACK matched to a non-2xx final response.
      *
      * <p>Retransmitted ACK requests absorbed in Confirmed are not delivered again.</p>

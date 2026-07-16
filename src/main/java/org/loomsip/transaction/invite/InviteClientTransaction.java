@@ -30,7 +30,7 @@ import java.util.function.Consumer;
  * <pre>{@code
  * INITIAL --INVITE--> CALLING --1xx--> PROCEEDING
  *                         |                 |
- *                         +----2xx----------+--> TERMINATED
+ *                         +----2xx----------+--> ACCEPTED --Timer M--> TERMINATED
  *                         |                 |
  *                         +----300-699------+--> COMPLETED
  *                                                  |
@@ -53,7 +53,6 @@ final class InviteClientTransaction extends AbstractInviteTransaction implements
 
     private volatile InviteClientState state = InviteClientState.INITIAL;
     private Duration timerAInterval;
-    private SipRequest non2xxAck;
     private long finalAckOperationId;
 
     InviteClientTransaction(
@@ -97,6 +96,18 @@ final class InviteClientTransaction extends AbstractInviteTransaction implements
 
     void shutdown() {
         submit(new TransactionShutdown());
+    }
+
+    boolean canCancel() {
+        return state == InviteClientState.CALLING || state == InviteClientState.PROCEEDING;
+    }
+
+    SipRequest originalInvite() {
+        return invite;
+    }
+
+    TransportEndpoint target() {
+        return target;
     }
 
     @Override
@@ -169,13 +180,16 @@ final class InviteClientTransaction extends AbstractInviteTransaction implements
             if (state == InviteClientState.CALLING || state == InviteClientState.PROCEEDING) {
                 timers().cancel(SipTimer.A);
                 timers().cancel(SipTimer.B);
+                state = InviteClientState.ACCEPTED;
+                timers().start(SipTimer.M, timerConfig.sixtyFourT1());
+            }
+            if (state == InviteClientState.ACCEPTED) {
                 notifyTu(() -> listener.onResponse(this, event.response(), event.context()));
-                transitionToTerminated();
             }
             return;
         }
         if (state == InviteClientState.COMPLETED) {
-            sendMessage(non2xxAck, target);
+            sendMessage(InviteAcknowledgements.createNon2xxAck(invite, event.response()), target);
             return;
         }
         if (state != InviteClientState.CALLING && state != InviteClientState.PROCEEDING) {
@@ -184,7 +198,7 @@ final class InviteClientTransaction extends AbstractInviteTransaction implements
 
         timers().cancel(SipTimer.A);
         timers().cancel(SipTimer.B);
-        non2xxAck = InviteAcknowledgements.createNon2xxAck(invite, event.response());
+        SipRequest non2xxAck = InviteAcknowledgements.createNon2xxAck(invite, event.response());
         state = InviteClientState.COMPLETED;
         finalAckOperationId = sendMessage(non2xxAck, target);
         notifyTu(() -> listener.onResponse(this, event.response(), event.context()));
@@ -206,6 +220,7 @@ final class InviteClientTransaction extends AbstractInviteTransaction implements
                 }
             }
             case D -> transitionToTerminated();
+            case M -> transitionToTerminated();
             default -> {
             }
         }
@@ -229,6 +244,9 @@ final class InviteClientTransaction extends AbstractInviteTransaction implements
     }
 
     private void handleTransportFailure(Throwable cause) {
+        if (state == InviteClientState.ACCEPTED) {
+            return;
+        }
         notifyTu(() -> listener.onTransportFailure(this, cause));
         transitionToTerminated();
     }

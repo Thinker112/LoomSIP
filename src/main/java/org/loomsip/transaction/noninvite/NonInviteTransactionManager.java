@@ -182,7 +182,7 @@ public final class NonInviteTransactionManager implements SipMessageHandler, Aut
      * @param target selected remote endpoint
      * @return client transaction handle
      * @throws TransactionKeyException if routing headers are malformed
-     * @throws IllegalArgumentException for INVITE, ACK, or CANCEL in this milestone
+     * @throws IllegalArgumentException for INVITE or ACK
      * @throws IllegalStateException if the manager is closed
      */
     public ClientTransactionHandle sendRequest(SipRequest request, TransportEndpoint target)
@@ -398,8 +398,7 @@ public final class NonInviteTransactionManager implements SipMessageHandler, Aut
 
     private static void rejectSpecialMethod(SipMethod method) {
         if (SipMethod.INVITE.equals(method)
-                || SipMethod.ACK.equals(method)
-                || SipMethod.CANCEL.equals(method)) {
+                || SipMethod.ACK.equals(method)) {
             throw new IllegalArgumentException("method is outside 3B Non-INVITE scope: " + method);
         }
     }

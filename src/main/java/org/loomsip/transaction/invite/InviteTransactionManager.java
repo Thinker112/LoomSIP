@@ -13,6 +13,7 @@ import org.loomsip.transaction.TransactionMessageSender;
 import org.loomsip.transaction.TransportReliability;
 import org.loomsip.transaction.event.RequestReceived;
 import org.loomsip.transaction.event.ResponseReceived;
+import org.loomsip.transaction.event.CancelRequested;
 import org.loomsip.transaction.timer.DefaultSipScheduler;
 import org.loomsip.transaction.timer.SipScheduler;
 import org.loomsip.transaction.timer.SipTimerConfig;
@@ -262,6 +263,31 @@ public final class InviteTransactionManager implements SipMessageHandler, AutoCl
         return serverTransactions.size();
     }
 
+    CancellationSource cancellationSource(InviteClientHandle handle) {
+        Objects.requireNonNull(handle, "handle");
+        ensureOpen();
+        if (!(handle instanceof InviteClientTransaction transaction)
+                || clientTransactions.find(transaction.key()).orElse(null) != transaction) {
+            throw new IllegalArgumentException("client transaction is not active in this manager");
+        }
+        if (!transaction.canCancel()) {
+            throw new IllegalStateException("INVITE transaction can no longer be cancelled: " + transaction.state());
+        }
+        return new CancellationSource(transaction.originalInvite(), transaction.target());
+    }
+
+    boolean requestCancellation(SipRequest cancel, TransportContext context) throws TransactionKeyException {
+        Objects.requireNonNull(cancel, "cancel");
+        Objects.requireNonNull(context, "context");
+        TransactionKey inviteKey = TransactionKeyFactory.relatedInvite(cancel);
+        SipTransaction selected = serverTransactions.find(inviteKey).orElse(null);
+        if (!(selected instanceof InviteServerTransaction transaction)) {
+            return false;
+        }
+        transaction.requestCancellation(new CancelRequested(cancel, context));
+        return true;
+    }
+
     /** Terminates active transactions and releases resources owned by this manager. */
     @Override
     public void close() {
@@ -445,5 +471,9 @@ public final class InviteTransactionManager implements SipMessageHandler, AutoCl
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /** Original request and target needed to create a related CANCEL. */
+    record CancellationSource(SipRequest invite, TransportEndpoint target) {
     }
 }

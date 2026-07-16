@@ -6,7 +6,9 @@ public enum InviteServerState {
     INITIAL,
     /** Initial INVITE delivered while provisional or final response is pending. */
     PROCEEDING,
-    /** Final response sent while waiting for a non-2xx ACK or local 2xx write completion. */
+    /** A 2xx response was sent and retransmitted INVITEs are being absorbed. */
+    ACCEPTED,
+    /** Non-2xx final response sent while waiting for its ACK. */
     COMPLETED,
     /** Non-2xx ACK received and delayed retransmissions are being absorbed. */
     CONFIRMED,

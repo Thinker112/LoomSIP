@@ -11,6 +11,7 @@ import org.loomsip.transaction.TransactionKey;
 import org.loomsip.transaction.TransactionMessageSender;
 import org.loomsip.transaction.TransportReliability;
 import org.loomsip.transaction.event.ApplicationResponse;
+import org.loomsip.transaction.event.CancelRequested;
 import org.loomsip.transaction.event.RequestReceived;
 import org.loomsip.transaction.event.TimerExpired;
 import org.loomsip.transaction.event.TransactionEvent;
@@ -23,7 +24,9 @@ import org.loomsip.transaction.timer.SipTimerConfig;
 import org.loomsip.transport.TransportEndpoint;
 
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
@@ -32,7 +35,7 @@ import java.util.function.Consumer;
  * RFC 3261 INVITE Server Transaction implementing Timer G, H, and I.
  *
  * <pre>{@code
- * INITIAL --INVITE--> PROCEEDING --2xx write--> TERMINATED
+ * INITIAL --INVITE--> PROCEEDING --2xx--> ACCEPTED --Timer L--> TERMINATED
  *                          |
  *                       300-699
  *                          v
@@ -56,8 +59,8 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
     private TransportEndpoint responseTarget;
     private SipResponse lastResponse;
     private Duration timerGInterval;
-    private boolean finalResponseIs2xx;
-    private long final2xxOperationId;
+    private boolean cancellationNotified;
+    private final Set<Long> acceptedResponseOperations = new HashSet<>();
 
     InviteServerTransaction(
             TransactionKey key,
@@ -94,9 +97,12 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
         submit(new TransactionShutdown());
     }
 
+    void requestCancellation(CancelRequested event) {
+        submit(event);
+    }
+
     boolean canConsumeAck() {
-        return (state == InviteServerState.COMPLETED && !finalResponseIs2xx)
-                || state == InviteServerState.CONFIRMED;
+        return state == InviteServerState.COMPLETED || state == InviteServerState.CONFIRMED;
     }
 
     @Override
@@ -125,14 +131,16 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
         }
         if (event instanceof RequestReceived requestReceived) {
             handleRequest(requestReceived);
+        } else if (event instanceof CancelRequested cancelRequested) {
+            handleCancel(cancelRequested);
         } else if (event instanceof ApplicationResponse applicationResponse) {
             handleResponse(applicationResponse.response());
         } else if (event instanceof TimerExpired timerExpired) {
             handleTimer(timerExpired);
         } else if (event instanceof TransportSucceeded transportSucceeded) {
-            handleTransportSuccess(transportSucceeded.operationId());
+            acceptedResponseOperations.remove(transportSucceeded.operationId());
         } else if (event instanceof TransportFailed transportFailed) {
-            handleTransportFailure(transportFailed.cause());
+            handleTransportFailure(transportFailed);
         }
     }
 
@@ -167,23 +175,32 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
     }
 
     private void handleResponse(SipResponse response) {
+        if (state == InviteServerState.ACCEPTED) {
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                validateResponseCorrelation(response);
+                acceptedResponseOperations.add(sendMessage(response, responseTarget));
+            }
+            return;
+        }
         if (state != InviteServerState.PROCEEDING) {
             return;
         }
         validateResponseCorrelation(response);
         lastResponse = response;
         if (response.statusCode() < 200) {
+            acceptedResponseOperations.add(sendMessage(response, responseTarget));
+            return;
+        }
+
+        if (response.statusCode() < 300) {
+            state = InviteServerState.ACCEPTED;
             sendMessage(response, responseTarget);
+            timers().start(SipTimer.L, timerConfig.sixtyFourT1());
             return;
         }
 
         state = InviteServerState.COMPLETED;
-        finalResponseIs2xx = response.statusCode() < 300;
-        long operationId = sendMessage(response, responseTarget);
-        if (finalResponseIs2xx) {
-            final2xxOperationId = operationId;
-            return;
-        }
+        sendMessage(response, responseTarget);
 
         if (reliability == TransportReliability.UNRELIABLE) {
             timerGInterval = timerConfig.t1();
@@ -192,8 +209,15 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
         timers().start(SipTimer.H, timerConfig.sixtyFourT1());
     }
 
+    private void handleCancel(CancelRequested event) {
+        if (state == InviteServerState.PROCEEDING && !cancellationNotified) {
+            cancellationNotified = true;
+            notifyTu(() -> listener.onCancel(this, event.cancel(), event.context()));
+        }
+    }
+
     private void handleAck(RequestReceived event) {
-        if (state != InviteServerState.COMPLETED || finalResponseIs2xx) {
+        if (state != InviteServerState.COMPLETED) {
             return;
         }
         timers().cancel(SipTimer.G);
@@ -214,19 +238,20 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
         switch (event.timer()) {
             case G -> handleTimerG();
             case H -> {
-                if (state == InviteServerState.COMPLETED && !finalResponseIs2xx) {
+                if (state == InviteServerState.COMPLETED) {
                     notifyTu(() -> listener.onTimeout(this, SipTimer.H));
                     transitionToTerminated();
                 }
             }
             case I -> transitionToTerminated();
+            case L -> transitionToTerminated();
             default -> {
             }
         }
     }
 
     private void handleTimerG() {
-        if (state != InviteServerState.COMPLETED || finalResponseIs2xx) {
+        if (state != InviteServerState.COMPLETED) {
             return;
         }
         sendMessage(lastResponse, responseTarget);
@@ -234,16 +259,12 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
         timers().start(SipTimer.G, timerGInterval);
     }
 
-    private void handleTransportSuccess(long operationId) {
-        if (state == InviteServerState.COMPLETED
-                && finalResponseIs2xx
-                && operationId == final2xxOperationId) {
-            transitionToTerminated();
+    private void handleTransportFailure(TransportFailed failure) {
+        if (state == InviteServerState.ACCEPTED
+                && !acceptedResponseOperations.remove(failure.operationId())) {
+            return;
         }
-    }
-
-    private void handleTransportFailure(Throwable cause) {
-        notifyTu(() -> listener.onTransportFailure(this, cause));
+        notifyTu(() -> listener.onTransportFailure(this, failure.cause()));
         transitionToTerminated();
     }
 

@@ -10,6 +10,7 @@ import org.loomsip.message.SipResponse;
 import org.loomsip.message.SipResponses;
 import org.loomsip.message.SipUri;
 import org.loomsip.transaction.TransactionMessageSender;
+import org.loomsip.transaction.TransactionRepositoryException;
 import org.loomsip.transaction.timer.SipTimer;
 import org.loomsip.transaction.timer.SipTimerConfig;
 import org.loomsip.transaction.timer.VirtualSipScheduler;
@@ -26,11 +27,16 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Timeout(10)
@@ -185,20 +191,30 @@ class InviteTransactionManagerTest {
     }
 
     @Test
-    void twoHundredTerminatesTransactionsAndAckUsesUnmatchedBoundary() throws Exception {
+    void acceptedDeliversAdditional2xxAndTimersMAndLCleanUp() throws Exception {
         try (TestRig rig = new TestRig((transaction, invite) ->
                 transaction.sendResponse(SipResponses.createResponse(invite, 200, "OK", "server-tag")))) {
             InviteClientHandle client = rig.sendInvite();
             SipResponse response = rig.client.responses.getFirst();
 
-            assertEquals(InviteClientState.TERMINATED, client.state());
-            assertEquals(0, rig.clientManager.activeClientTransactions());
-            assertEquals(0, rig.serverManager.activeServerTransactions());
+            assertEquals(InviteClientState.ACCEPTED, client.state());
+            assertEquals(InviteServerState.ACCEPTED, rig.server.lastTransaction.state());
+            assertEquals(1, rig.clientManager.activeClientTransactions());
+            assertEquals(1, rig.serverManager.activeServerTransactions());
             assertEquals(0, rig.network.ackAttempts());
 
             rig.network.send(ackFor2xx(rig.invite, response), rig.serverEndpoint);
-
             assertEquals(1, rig.server.unmatchedAckCount.get());
+
+            SipResponse forked = SipResponses.createResponse(rig.invite, 200, "OK", "forked-server-tag");
+            rig.network.send(forked, rig.clientEndpoint);
+            assertEquals(List.of(200, 200), rig.client.statuses());
+
+            rig.scheduler.advanceBy(TIMERS.sixtyFourT1());
+            assertEquals(InviteClientState.TERMINATED, client.state());
+            assertEquals(InviteServerState.TERMINATED, rig.server.lastTransaction.state());
+            assertEquals(0, rig.clientManager.activeClientTransactions());
+            assertEquals(0, rig.serverManager.activeServerTransactions());
         }
     }
 
@@ -217,19 +233,122 @@ class InviteTransactionManagerTest {
         }
     }
 
+    @Test
+    void enforcesClientCapacityAndCloseRemovesActiveTransaction() throws Exception {
+        VirtualSipScheduler scheduler = new VirtualSipScheduler();
+        TransportEndpoint clientEndpoint = endpoint(17160);
+        TransportEndpoint serverEndpoint = endpoint(17161);
+        InviteClientListener clientListener = (transaction, response, context) -> {
+        };
+        InviteServerListener serverListener = (transaction, request, context) -> {
+        };
+        TransactionMessageSender sender = (message, target) -> CompletableFuture.completedFuture(
+                new SendResult(clientEndpoint, target, 1)
+        );
+        InviteTransactionConfig capacityOne = new InviteTransactionConfig(1, 1, 32, 16);
+
+        try (InviteTransactionManager manager = new InviteTransactionManager(
+                sender,
+                TIMERS,
+                capacityOne,
+                clientListener,
+                serverListener,
+                scheduler,
+                Runnable::run,
+                Runnable::run
+        )) {
+            InviteClientHandle first = manager.sendInvite(
+                    invite(clientEndpoint, "capacity-one"),
+                    serverEndpoint
+            );
+
+            assertThrows(TransactionRepositoryException.class, () -> manager.sendInvite(
+                    invite(clientEndpoint, "capacity-two"),
+                    serverEndpoint
+            ));
+            assertEquals(1, manager.activeClientTransactions());
+
+            manager.close();
+            assertEquals(InviteClientState.TERMINATED, first.state());
+            assertEquals(0, manager.activeClientTransactions());
+        } finally {
+            scheduler.close();
+        }
+    }
+
+    @Test
+    void blockedTuCallbackDoesNotBlockTimerBOrRepositoryCleanup() throws Exception {
+        VirtualSipScheduler scheduler = new VirtualSipScheduler();
+        ExecutorService callbackExecutor = Executors.newSingleThreadExecutor();
+        CountDownLatch callbackEntered = new CountDownLatch(1);
+        CountDownLatch releaseCallback = new CountDownLatch(1);
+        TransportEndpoint clientEndpoint = endpoint(17260);
+        TransportEndpoint serverEndpoint = endpoint(17261);
+        SipRequest invite = invite(clientEndpoint, "blocked-tu");
+        InviteClientListener clientListener = (transaction, response, context) -> {
+            callbackEntered.countDown();
+            try {
+                releaseCallback.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        InviteServerListener serverListener = (transaction, request, context) -> {
+        };
+        TransactionMessageSender sender = (message, target) -> CompletableFuture.completedFuture(
+                new SendResult(clientEndpoint, target, 1)
+        );
+
+        try (InviteTransactionManager manager = new InviteTransactionManager(
+                sender,
+                TIMERS,
+                InviteTransactionConfig.DEFAULT,
+                clientListener,
+                serverListener,
+                scheduler,
+                Runnable::run,
+                callbackExecutor
+        )) {
+            InviteClientHandle transaction = manager.sendInvite(invite, serverEndpoint);
+            manager.onMessage(new InboundSipMessage(
+                    SipResponses.createResponse(invite, 180, "Ringing"),
+                    new TransportContext(
+                            serverEndpoint.protocol(),
+                            clientEndpoint.address(),
+                            serverEndpoint.address()
+                    )
+            ));
+            assertTrue(callbackEntered.await(2, TimeUnit.SECONDS));
+
+            scheduler.advanceBy(TIMERS.sixtyFourT1());
+
+            assertEquals(InviteClientState.TERMINATED, transaction.state());
+            assertEquals(0, manager.activeClientTransactions());
+        } finally {
+            releaseCallback.countDown();
+            callbackExecutor.shutdownNow();
+            callbackExecutor.awaitTermination(2, TimeUnit.SECONDS);
+            scheduler.close();
+        }
+    }
+
     private static SipResponse busy(SipRequest invite) {
         return SipResponses.createResponse(invite, 486, "Busy Here", "server-tag");
     }
 
     private static SipRequest invite(TransportEndpoint local) {
+        return invite(local, "invite-test");
+    }
+
+    private static SipRequest invite(TransportEndpoint local, String identity) {
         String host = local.address().getAddress().getHostAddress();
         SipHeaders headers = SipHeaders.builder()
                 .add("Via", "SIP/2.0/" + local.protocol() + " " + host + ":" + local.address().getPort()
-                        + ";branch=z9hG4bK-invite-test;rport")
+                        + ";branch=z9hG4bK-" + identity + ";rport")
                 .add("Max-Forwards", "70")
                 .add("From", "<sip:alice@example.com>;tag=client-tag")
                 .add("To", "<sip:bob@example.com>")
-                .add("Call-ID", "invite-test@example.com")
+                .add("Call-ID", identity + "@example.com")
                 .add("CSeq", "1 INVITE")
                 .build();
         return new SipRequest(SipMethod.INVITE, SipUri.parse("sip:bob@example.com"), headers);
