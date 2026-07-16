@@ -10,6 +10,20 @@ import java.util.concurrent.CompletionStage;
  * <p>A transport must be started before sending. Closing is idempotent, but a
  * closed or failed instance cannot be restarted. This interface deliberately
  * does not correlate responses or implement transaction timers.</p>
+ *
+ * <pre>{@code
+ * Outbound SipMessage                  Network bytes
+ *         |                                  |
+ *         v                                  v
+ * +----------------+                  +----------------+
+ * | send(message)  |                  | inbound decode |
+ * +-------+--------+                  +-------+--------+
+ *         |                                   |
+ *         v                                   v
+ * CompletionStage<SendResult>         InboundSipMessage
+ *
+ * Lifecycle: NEW -> STARTING -> RUNNING -> CLOSING -> CLOSED
+ * }</pre>
  */
 public interface SipTransport extends AutoCloseable {
 

@@ -25,6 +25,22 @@ import java.util.Objects;
  * {@code Content-Length} field is present, the supplied byte array must contain
  * exactly that many body bytes. Without the field, all bytes after the header
  * delimiter are treated as the body.</p>
+ *
+ * <pre>{@code
+ * Complete wire bytes
+ *        |
+ *        v
+ * +-------------------+
+ * | SipMessageParser  |
+ * | - framing checks  |
+ * | - size limits     |
+ * | - header parsing  |
+ * | - body validation |
+ * +---------+---------+
+ *           |
+ *           v
+ * SipRequest or SipResponse
+ * }</pre>
  */
 public final class SipMessageParser {
 

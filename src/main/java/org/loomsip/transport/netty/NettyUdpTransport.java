@@ -48,6 +48,26 @@ import java.util.concurrent.TimeUnit;
  * <p>Datagram copying and parsing run on the Netty EventLoop. Successfully
  * parsed messages and diagnostics are forwarded to a shared virtual-thread
  * executor, so application work never blocks the EventLoop.</p>
+ *
+ * <pre>{@code
+ * UDP Datagram
+ *      |
+ *      v
+ * Netty EventLoop
+ *      |
+ *      +--> size check --> byte[] copy --> SipMessageParser
+ *                                              |
+ *                                              v
+ *                                   InboundSipMessage
+ *                                              |
+ *                                              v
+ *                                  Virtual-thread Executor
+ *                                              |
+ *                                              v
+ *                                      SipMessageHandler
+ *
+ * Outbound SipMessage --> Encoder --> ChannelFuture --> SendResult/Event
+ * }</pre>
  */
 public final class NettyUdpTransport implements SipTransport {
 

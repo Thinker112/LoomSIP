@@ -20,4 +20,11 @@ Package-private implementation types should also have Javadoc when their respons
 
 Standard overrides such as `equals`, `hashCode`, and `toString` do not need duplicate Javadoc when they retain the inherited contract.
 
+Core coordination components must include a compact ASCII diagram in their
+class-level Javadoc. The diagram should show the component's inputs, outputs,
+and relationship to adjacent layers. Use a Javadoc `<pre>{@code ...}</pre>`
+block so the generated documentation preserves alignment. Pure value objects
+and trivial utilities do not need diagrams unless their lifecycle or data flow
+is otherwise difficult to understand.
+
 Keep comments synchronized with behavior. Tests remain the executable specification for protocol edge cases.

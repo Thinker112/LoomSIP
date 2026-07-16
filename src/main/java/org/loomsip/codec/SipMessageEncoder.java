@@ -15,6 +15,22 @@ import java.util.Objects;
  *
  * <p>The encoder emits CRLF line endings and replaces all supplied
  * {@code Content-Length} fields with one value calculated from the binary body.</p>
+ *
+ * <pre>{@code
+ * SipRequest or SipResponse
+ *           |
+ *           v
+ * +-------------------+
+ * | SipMessageEncoder |
+ * | - start-line      |
+ * | - ordered headers |
+ * | - Content-Length  |
+ * | - binary body     |
+ * +---------+---------+
+ *           |
+ *           v
+ * Complete wire bytes
+ * }</pre>
  */
 public final class SipMessageEncoder {
 
