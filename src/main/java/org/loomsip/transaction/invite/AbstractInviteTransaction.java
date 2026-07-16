@@ -1,4 +1,4 @@
-package org.loomsip.transaction.noninvite;
+package org.loomsip.transaction.invite;
 
 import org.loomsip.transaction.SipTransaction;
 import org.loomsip.transaction.TransactionKey;
@@ -10,29 +10,29 @@ import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 
 /**
- * Adapts the shared transaction execution boundary to Non-INVITE configuration.
+ * Adapts the shared transaction execution boundary to INVITE configuration.
  *
  * <pre>{@code
- * NICT / NIST
- *      |
- *      v
- * AbstractNonInviteTransaction
- *      |
- *      v
+ * ICT / IST
+ *    |
+ *    v
+ * AbstractInviteTransaction
+ *    |
+ *    v
  * AbstractTransaction
- *      |
- *      +--> Mailbox / Timer / Sender / TU callbacks
+ *    |
+ *    +--> Mailbox / Timer / Sender / TU callbacks
  * }</pre>
  */
-abstract class AbstractNonInviteTransaction extends AbstractTransaction {
+abstract class AbstractInviteTransaction extends AbstractTransaction {
 
-    AbstractNonInviteTransaction(
+    AbstractInviteTransaction(
             TransactionKey key,
             TransactionMessageSender sender,
             SipScheduler scheduler,
             Executor transactionExecutor,
             Executor callbackExecutor,
-            NonInviteTransactionConfig config,
+            InviteTransactionConfig config,
             Consumer<? super SipTransaction> terminationCallback,
             Consumer<? super Throwable> infrastructureErrorHandler
     ) {

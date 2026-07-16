@@ -1,5 +1,6 @@
-package org.loomsip.transaction.noninvite;
+package org.loomsip.transaction.invite;
 
+import org.loomsip.message.SipMethod;
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipResponse;
 import org.loomsip.message.header.CSeqHeaderValue;
@@ -21,43 +22,44 @@ import org.loomsip.transaction.timer.SipTimer;
 import org.loomsip.transaction.timer.SipTimerConfig;
 import org.loomsip.transport.TransportEndpoint;
 
+import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 
 /**
- * RFC 3261 Non-INVITE Server Transaction implementing duplicate handling and Timer J.
+ * RFC 3261 INVITE Server Transaction implementing Timer G, H, and I.
  *
  * <pre>{@code
- * INITIAL --first request--> TRYING --1xx--> PROCEEDING
- *                                 |              |
- *                                 +----final-----+
- *                                         |
- *                                         v
- *                                     COMPLETED
- *                                         |
- *                               Timer J / reliable transport
- *                                         v
- *                                     TERMINATED
+ * INITIAL --INVITE--> PROCEEDING --2xx write--> TERMINATED
+ *                          |
+ *                       300-699
+ *                          v
+ *                      COMPLETED --ACK--> CONFIRMED
+ *                          |                  |
+ *                       Timer H            Timer I
+ *                          |                  |
+ *                          +-------> TERMINATED
  *
- * Duplicate request in PROCEEDING/COMPLETED -> resend last response
+ * Timer G: retransmit non-2xx response
  * }</pre>
  */
-final class NonInviteServerTransaction extends AbstractNonInviteTransaction
-        implements ServerTransactionHandle {
+final class InviteServerTransaction extends AbstractInviteTransaction implements InviteServerHandle {
 
     private final TransportReliability reliability;
     private final SipTimerConfig timerConfig;
-    private final NonInviteServerListener listener;
+    private final InviteServerListener listener;
 
-    private volatile NonInviteServerState state = NonInviteServerState.INITIAL;
-    private SipRequest request;
+    private volatile InviteServerState state = InviteServerState.INITIAL;
+    private SipRequest invite;
     private TransportEndpoint responseTarget;
     private SipResponse lastResponse;
-    private long finalResponseOperationId;
+    private Duration timerGInterval;
+    private boolean finalResponseIs2xx;
+    private long final2xxOperationId;
 
-    NonInviteServerTransaction(
+    InviteServerTransaction(
             TransactionKey key,
             TransportReliability reliability,
             TransactionMessageSender sender,
@@ -65,8 +67,8 @@ final class NonInviteServerTransaction extends AbstractNonInviteTransaction
             SipScheduler scheduler,
             Executor transactionExecutor,
             Executor callbackExecutor,
-            NonInviteTransactionConfig config,
-            NonInviteServerListener listener,
+            InviteTransactionConfig config,
+            InviteServerListener listener,
             Consumer<? super SipTransaction> terminationCallback
     ) {
         super(
@@ -92,8 +94,13 @@ final class NonInviteServerTransaction extends AbstractNonInviteTransaction
         submit(new TransactionShutdown());
     }
 
+    boolean canConsumeAck() {
+        return (state == InviteServerState.COMPLETED && !finalResponseIs2xx)
+                || state == InviteServerState.CONFIRMED;
+    }
+
     @Override
-    public NonInviteServerState state() {
+    public InviteServerState state() {
         return state;
     }
 
@@ -113,7 +120,7 @@ final class NonInviteServerTransaction extends AbstractNonInviteTransaction
             transitionToTerminated();
             return;
         }
-        if (state == NonInviteServerState.TERMINATED) {
+        if (state == InviteServerState.TERMINATED) {
             return;
         }
         if (event instanceof RequestReceived requestReceived) {
@@ -132,46 +139,71 @@ final class NonInviteServerTransaction extends AbstractNonInviteTransaction
     @Override
     protected void handleInfrastructureFailure(Throwable cause) {
         reportInfrastructureFailure(cause);
-        if (state != NonInviteServerState.TERMINATED) {
-            state = NonInviteServerState.TERMINATED;
+        if (state != InviteServerState.TERMINATED) {
+            state = InviteServerState.TERMINATED;
             terminate(() -> listener.onTerminated(this));
         }
     }
 
     private void handleRequest(RequestReceived event) {
-        if (state == NonInviteServerState.INITIAL) {
-            request = event.request();
+        if (state == InviteServerState.INITIAL) {
+            invite = event.request();
             responseTarget = new TransportEndpoint(
                     event.context().protocol(),
                     event.context().remoteAddress()
             );
-            state = NonInviteServerState.TRYING;
-            notifyTu(() -> listener.onRequest(this, event.request(), event.context()));
+            state = InviteServerState.PROCEEDING;
+            notifyTu(() -> listener.onInvite(this, event.request(), event.context()));
             return;
         }
-        if ((state == NonInviteServerState.PROCEEDING || state == NonInviteServerState.COMPLETED)
+        if (SipMethod.ACK.equals(event.request().method())) {
+            handleAck(event);
+            return;
+        }
+        if ((state == InviteServerState.PROCEEDING || state == InviteServerState.COMPLETED)
                 && lastResponse != null) {
             sendMessage(lastResponse, responseTarget);
         }
     }
 
     private void handleResponse(SipResponse response) {
-        if (state != NonInviteServerState.TRYING && state != NonInviteServerState.PROCEEDING) {
+        if (state != InviteServerState.PROCEEDING) {
             return;
         }
         validateResponseCorrelation(response);
         lastResponse = response;
-        long operationId = sendMessage(response, responseTarget);
         if (response.statusCode() < 200) {
-            state = NonInviteServerState.PROCEEDING;
+            sendMessage(response, responseTarget);
             return;
         }
 
-        state = NonInviteServerState.COMPLETED;
+        state = InviteServerState.COMPLETED;
+        finalResponseIs2xx = response.statusCode() < 300;
+        long operationId = sendMessage(response, responseTarget);
+        if (finalResponseIs2xx) {
+            final2xxOperationId = operationId;
+            return;
+        }
+
         if (reliability == TransportReliability.UNRELIABLE) {
-            timers().start(SipTimer.J, timerConfig.sixtyFourT1());
+            timerGInterval = timerConfig.t1();
+            timers().start(SipTimer.G, timerGInterval);
+        }
+        timers().start(SipTimer.H, timerConfig.sixtyFourT1());
+    }
+
+    private void handleAck(RequestReceived event) {
+        if (state != InviteServerState.COMPLETED || finalResponseIs2xx) {
+            return;
+        }
+        timers().cancel(SipTimer.G);
+        timers().cancel(SipTimer.H);
+        state = InviteServerState.CONFIRMED;
+        notifyTu(() -> listener.onAck(this, event.request(), event.context()));
+        if (reliability == TransportReliability.UNRELIABLE) {
+            timers().start(SipTimer.I, timerConfig.t4());
         } else {
-            finalResponseOperationId = operationId;
+            transitionToTerminated();
         }
     }
 
@@ -179,7 +211,33 @@ final class NonInviteServerTransaction extends AbstractNonInviteTransaction
         if (!timers().consumeIfCurrent(event.timer(), event.generation())) {
             return;
         }
-        if (event.timer() == SipTimer.J) {
+        switch (event.timer()) {
+            case G -> handleTimerG();
+            case H -> {
+                if (state == InviteServerState.COMPLETED && !finalResponseIs2xx) {
+                    notifyTu(() -> listener.onTimeout(this, SipTimer.H));
+                    transitionToTerminated();
+                }
+            }
+            case I -> transitionToTerminated();
+            default -> {
+            }
+        }
+    }
+
+    private void handleTimerG() {
+        if (state != InviteServerState.COMPLETED || finalResponseIs2xx) {
+            return;
+        }
+        sendMessage(lastResponse, responseTarget);
+        timerGInterval = minimum(timerGInterval.multipliedBy(2), timerConfig.t2());
+        timers().start(SipTimer.G, timerGInterval);
+    }
+
+    private void handleTransportSuccess(long operationId) {
+        if (state == InviteServerState.COMPLETED
+                && finalResponseIs2xx
+                && operationId == final2xxOperationId) {
             transitionToTerminated();
         }
     }
@@ -189,22 +247,14 @@ final class NonInviteServerTransaction extends AbstractNonInviteTransaction
         transitionToTerminated();
     }
 
-    private void handleTransportSuccess(long operationId) {
-        if (reliability == TransportReliability.RELIABLE
-                && state == NonInviteServerState.COMPLETED
-                && operationId == finalResponseOperationId) {
-            transitionToTerminated();
-        }
-    }
-
     private void validateResponseCorrelation(SipResponse response) {
         try {
-            CSeqHeaderValue requestCSeq = SipHeaderValues.cseq(request.headers());
+            CSeqHeaderValue requestCSeq = SipHeaderValues.cseq(invite.headers());
             CSeqHeaderValue responseCSeq = SipHeaderValues.cseq(response.headers());
-            String requestCallId = SipHeaderValues.callId(request.headers());
+            String requestCallId = SipHeaderValues.callId(invite.headers());
             String responseCallId = SipHeaderValues.callId(response.headers());
             if (!requestCSeq.equals(responseCSeq) || !requestCallId.equals(responseCallId)) {
-                throw new IllegalArgumentException("response does not match server transaction CSeq/Call-ID");
+                throw new IllegalArgumentException("response does not match INVITE transaction CSeq/Call-ID");
             }
         } catch (SipHeaderValueException exception) {
             throw new IllegalArgumentException("response routing headers are malformed", exception);
@@ -212,10 +262,14 @@ final class NonInviteServerTransaction extends AbstractNonInviteTransaction
     }
 
     private void transitionToTerminated() {
-        if (state == NonInviteServerState.TERMINATED) {
+        if (state == InviteServerState.TERMINATED) {
             return;
         }
-        state = NonInviteServerState.TERMINATED;
+        state = InviteServerState.TERMINATED;
         terminate(() -> listener.onTerminated(this));
+    }
+
+    private static Duration minimum(Duration first, Duration second) {
+        return first.compareTo(second) <= 0 ? first : second;
     }
 }

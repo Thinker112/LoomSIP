@@ -1,6 +1,7 @@
-package org.loomsip.transaction.noninvite;
+package org.loomsip.transaction.invite;
 
 import org.loomsip.message.SipRequest;
+import org.loomsip.message.SipResponse;
 import org.loomsip.transaction.SipTransaction;
 import org.loomsip.transaction.TransactionKey;
 import org.loomsip.transaction.TransactionMessageSender;
@@ -11,6 +12,7 @@ import org.loomsip.transaction.event.TimerExpired;
 import org.loomsip.transaction.event.TransactionEvent;
 import org.loomsip.transaction.event.TransactionShutdown;
 import org.loomsip.transaction.event.TransportFailed;
+import org.loomsip.transaction.event.TransportSucceeded;
 import org.loomsip.transaction.timer.SipScheduler;
 import org.loomsip.transaction.timer.SipTimer;
 import org.loomsip.transaction.timer.SipTimerConfig;
@@ -23,38 +25,40 @@ import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 
 /**
- * RFC 3261 Non-INVITE Client Transaction implementing Timer E, F, and K.
+ * RFC 3261 INVITE Client Transaction implementing Timer A, B, and D.
  *
  * <pre>{@code
- * INITIAL --ApplicationRequest--> TRYING --1xx--> PROCEEDING
- *                                  |                 |
- *                                  +----final--------+
- *                                           |
- *                                           v
- *                                       COMPLETED
- *                                           |
- *                                      Timer K / reliable
- *                                           v
- *                                       TERMINATED
+ * INITIAL --INVITE--> CALLING --1xx--> PROCEEDING
+ *                         |                 |
+ *                         +----2xx----------+--> TERMINATED
+ *                         |                 |
+ *                         +----300-699------+--> COMPLETED
+ *                                                  |
+ *                                  Timer D / reliable ACK write
+ *                                                  v
+ *                                             TERMINATED
  *
- * Timer E: retransmit request       Timer F: total timeout
+ * Timer A: retransmit INVITE       Timer B: total timeout
  * }</pre>
  */
-final class NonInviteClientTransaction extends AbstractNonInviteTransaction
-        implements ClientTransactionHandle {
+final class InviteClientTransaction extends AbstractInviteTransaction implements InviteClientHandle {
 
-    private final SipRequest request;
+    private static final Duration TIMER_D_UNRELIABLE = Duration.ofSeconds(32);
+
+    private final SipRequest invite;
     private final TransportEndpoint target;
     private final TransportReliability reliability;
     private final SipTimerConfig timerConfig;
-    private final NonInviteClientListener listener;
+    private final InviteClientListener listener;
 
-    private volatile NonInviteClientState state = NonInviteClientState.INITIAL;
-    private Duration timerEInterval;
+    private volatile InviteClientState state = InviteClientState.INITIAL;
+    private Duration timerAInterval;
+    private SipRequest non2xxAck;
+    private long finalAckOperationId;
 
-    NonInviteClientTransaction(
+    InviteClientTransaction(
             TransactionKey key,
-            SipRequest request,
+            SipRequest invite,
             TransportEndpoint target,
             TransportReliability reliability,
             TransactionMessageSender sender,
@@ -62,8 +66,8 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
             SipScheduler scheduler,
             Executor transactionExecutor,
             Executor callbackExecutor,
-            NonInviteTransactionConfig config,
-            NonInviteClientListener listener,
+            InviteTransactionConfig config,
+            InviteClientListener listener,
             Consumer<? super SipTransaction> terminationCallback
     ) {
         super(
@@ -76,7 +80,7 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
                 terminationCallback,
                 listener::onLayerError
         );
-        this.request = Objects.requireNonNull(request, "request");
+        this.invite = Objects.requireNonNull(invite, "invite");
         this.target = Objects.requireNonNull(target, "target");
         this.reliability = Objects.requireNonNull(reliability, "reliability");
         this.timerConfig = Objects.requireNonNull(timerConfig, "timerConfig");
@@ -84,7 +88,7 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
     }
 
     void start() {
-        submit(new ApplicationRequest(request, target));
+        submit(new ApplicationRequest(invite, target));
     }
 
     void receive(ResponseReceived response) {
@@ -96,7 +100,7 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
     }
 
     @Override
-    public NonInviteClientState state() {
+    public InviteClientState state() {
         return state;
     }
 
@@ -111,7 +115,7 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
             transitionToTerminated();
             return;
         }
-        if (state == NonInviteClientState.TERMINATED) {
+        if (state == InviteClientState.TERMINATED) {
             return;
         }
         if (event instanceof ApplicationRequest applicationRequest) {
@@ -120,6 +124,8 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
             handleResponse(responseReceived);
         } else if (event instanceof TimerExpired timerExpired) {
             handleTimer(timerExpired);
+        } else if (event instanceof TransportSucceeded transportSucceeded) {
+            handleTransportSuccess(transportSucceeded.operationId());
         } else if (event instanceof TransportFailed transportFailed) {
             handleTransportFailure(transportFailed.cause());
         }
@@ -128,48 +134,62 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
     @Override
     protected void handleInfrastructureFailure(Throwable cause) {
         reportInfrastructureFailure(cause);
-        if (state != NonInviteClientState.TERMINATED) {
-            state = NonInviteClientState.TERMINATED;
+        if (state != InviteClientState.TERMINATED) {
+            state = InviteClientState.TERMINATED;
             terminate(() -> listener.onTerminated(this));
         }
     }
 
     private void handleStart(ApplicationRequest event) {
-        if (state != NonInviteClientState.INITIAL) {
+        if (state != InviteClientState.INITIAL) {
             return;
         }
-        state = NonInviteClientState.TRYING;
+        state = InviteClientState.CALLING;
         sendMessage(event.request(), event.target());
         if (reliability == TransportReliability.UNRELIABLE) {
-            timerEInterval = timerConfig.t1();
-            timers().start(SipTimer.E, timerEInterval);
+            timerAInterval = timerConfig.t1();
+            timers().start(SipTimer.A, timerAInterval);
         }
-        timers().start(SipTimer.F, timerConfig.sixtyFourT1());
+        timers().start(SipTimer.B, timerConfig.sixtyFourT1());
     }
 
     private void handleResponse(ResponseReceived event) {
         int status = event.response().statusCode();
         if (status < 200) {
-            if (state == NonInviteClientState.TRYING) {
-                state = NonInviteClientState.PROCEEDING;
+            if (state == InviteClientState.CALLING) {
+                timers().cancel(SipTimer.A);
+                state = InviteClientState.PROCEEDING;
             }
-            if (state == NonInviteClientState.PROCEEDING) {
+            if (state == InviteClientState.PROCEEDING) {
                 notifyTu(() -> listener.onResponse(this, event.response(), event.context()));
             }
             return;
         }
-        if (state != NonInviteClientState.TRYING && state != NonInviteClientState.PROCEEDING) {
+        if (status < 300) {
+            if (state == InviteClientState.CALLING || state == InviteClientState.PROCEEDING) {
+                timers().cancel(SipTimer.A);
+                timers().cancel(SipTimer.B);
+                notifyTu(() -> listener.onResponse(this, event.response(), event.context()));
+                transitionToTerminated();
+            }
+            return;
+        }
+        if (state == InviteClientState.COMPLETED) {
+            sendMessage(non2xxAck, target);
+            return;
+        }
+        if (state != InviteClientState.CALLING && state != InviteClientState.PROCEEDING) {
             return;
         }
 
-        timers().cancel(SipTimer.E);
-        timers().cancel(SipTimer.F);
-        state = NonInviteClientState.COMPLETED;
+        timers().cancel(SipTimer.A);
+        timers().cancel(SipTimer.B);
+        non2xxAck = InviteAcknowledgements.createNon2xxAck(invite, event.response());
+        state = InviteClientState.COMPLETED;
+        finalAckOperationId = sendMessage(non2xxAck, target);
         notifyTu(() -> listener.onResponse(this, event.response(), event.context()));
         if (reliability == TransportReliability.UNRELIABLE) {
-            timers().start(SipTimer.K, timerConfig.t4());
-        } else {
-            transitionToTerminated();
+            timers().start(SipTimer.D, TIMER_D_UNRELIABLE);
         }
     }
 
@@ -178,47 +198,46 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
             return;
         }
         switch (event.timer()) {
-            case E -> handleTimerE();
-            case F -> {
-                notifyTu(() -> listener.onTimeout(this, SipTimer.F));
-                transitionToTerminated();
+            case A -> handleTimerA();
+            case B -> {
+                if (state == InviteClientState.CALLING || state == InviteClientState.PROCEEDING) {
+                    notifyTu(() -> listener.onTimeout(this, SipTimer.B));
+                    transitionToTerminated();
+                }
             }
-            case K -> transitionToTerminated();
+            case D -> transitionToTerminated();
             default -> {
             }
         }
     }
 
-    private void handleTimerE() {
-        if (state != NonInviteClientState.TRYING && state != NonInviteClientState.PROCEEDING) {
+    private void handleTimerA() {
+        if (state != InviteClientState.CALLING) {
             return;
         }
-        sendMessage(request, target);
-        if (state == NonInviteClientState.TRYING) {
-            timerEInterval = minimum(timerEInterval.multipliedBy(2), timerConfig.t2());
-        } else {
-            timerEInterval = timerConfig.t2();
+        sendMessage(invite, target);
+        timerAInterval = timerAInterval.multipliedBy(2);
+        timers().start(SipTimer.A, timerAInterval);
+    }
+
+    private void handleTransportSuccess(long operationId) {
+        if (reliability == TransportReliability.RELIABLE
+                && state == InviteClientState.COMPLETED
+                && operationId == finalAckOperationId) {
+            transitionToTerminated();
         }
-        timers().start(SipTimer.E, timerEInterval);
     }
 
     private void handleTransportFailure(Throwable cause) {
-        if (state == NonInviteClientState.COMPLETED) {
-            return;
-        }
         notifyTu(() -> listener.onTransportFailure(this, cause));
         transitionToTerminated();
     }
 
     private void transitionToTerminated() {
-        if (state == NonInviteClientState.TERMINATED) {
+        if (state == InviteClientState.TERMINATED) {
             return;
         }
-        state = NonInviteClientState.TERMINATED;
+        state = InviteClientState.TERMINATED;
         terminate(() -> listener.onTerminated(this));
-    }
-
-    private static Duration minimum(Duration first, Duration second) {
-        return first.compareTo(second) <= 0 ? first : second;
     }
 }
