@@ -13,7 +13,7 @@
 
 第五阶段在不改变 Transaction/Dialog 串行模型的前提下，引入 TCP/TLS 流式分帧、连接复用、连接失败传播和资源限制。
 
-实施状态：方案已确认，待从 5A 开始执行。
+实施状态：5A 已完成（2026-07-17），5B～5F 待执行。
 
 ## 2. 阶段目标
 
@@ -110,6 +110,8 @@ flowchart LR
 
 ## 5. 5A：TCP/TLS 流式分帧
 
+实施状态：已完成（2026-07-17）。
+
 ### 5.1 责任
 
 `SipStreamDecoder` 只负责从连续字节流中提取完整 SIP 报文，不负责解析 Transaction 或 Dialog 语义。
@@ -202,6 +204,20 @@ release cumulation buffer
 - Header delimiter 跨 ByteBuf 边界。
 - start-line、Header、Body、完整消息和累计缓冲区超限。
 - 解析错误后释放 ByteBuf 且关闭 Channel。
+
+已实现组件：
+
+- `StreamBufferLimits`：独立于完整报文 Parser 的流式累计和消息大小限制。
+- `SipStreamDecoderState`：`READING_HEADERS` 与 `READING_BODY` 增量状态。
+- `SipStreamFramer`：纯 Java 增量分帧核心，不依赖 Netty 类型。
+- `SipStreamDecoder`：Netty `ByteToMessageDecoder` 适配器，输出完整 `SipMessage`。
+
+已验证测试：
+
+- `SipStreamFramerTest`：9 个分帧、长度和限制场景。
+- `SipStreamDecoderTest`：3 个 Netty 半包、粘包和连接级错误场景。
+
+5A 不创建 TCP 连接、不管理 TLS 握手，也不修改 Transaction/Dialog；这些职责分别保留到 5B～5D。
 
 ## 6. 5B：TCP Transport 和连接复用
 
@@ -590,6 +606,7 @@ INVITE over TCP
 
 ```text
 org.loomsip.codec
+  SipStreamFramer
   SipStreamDecoderState
   StreamBufferLimits
 
