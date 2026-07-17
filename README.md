@@ -2,7 +2,7 @@
 
 LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协议栈，目标是遵循 RFC 3261 的协议分层与事务语义，并通过 Netty 和 Java 虚拟线程建立清晰、可测试的并发模型。
 
-项目当前处于早期开发阶段。仓库已实现不可变 SIP 消息模型以及基础 Parser/Encoder；UDP/TCP/TLS 传输、Transaction、Dialog 和完整 Stack API 仍在后续规划中，暂不适合生产环境使用。
+项目当前处于核心协议栈开发阶段。仓库已经实现不可变 SIP 消息模型、Parser/Encoder、Netty UDP Transport、四类 Transaction 状态机、Dialog Layer，以及 INVITE/ACK/re-INVITE/BYE/CANCEL 基本呼叫流程。下一里程碑是 TCP/TLS 可靠传输；统一 Stack API、认证和扩展能力仍在后续规划中，因此当前版本暂不适合生产环境使用。
 
 ## 设计目标
 
@@ -22,12 +22,15 @@ LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协
 | SIP Parser | 已实现 | 支持完整报文、重复/紧凑/未知 Header、扩展 Method、折行与二进制 Body |
 | SIP Encoder | 已实现 | 输出规范 CRLF 报文，并根据 Body 修正 `Content-Length` |
 | Parser 资源限制 | 已实现 | 可限制 start-line、Header 区和 Body 大小 |
-| Netty UDP Transport | 规划中 | 下一里程碑，完成 OPTIONS/`200 OK` UDP 收发闭环 |
-| Transaction Layer | 规划中 | ICT、IST、NICT、NIST 状态机、重传与 Timer |
-| Dialog Layer | 规划中 | Dialog 生命周期、Route Set、Remote Target 与 CSeq 管理 |
-| TCP/TLS Transport | 规划中 | 流式分帧、连接复用和 TLS 会话管理 |
+| Netty UDP Transport | 已实现 | UDP 生命周期、编解码、发送失败和真实回环收发 |
+| Transaction Layer | 已实现 | ICT、IST、NICT、NIST、虚拟 Timer、ACK/CANCEL 和 RFC 6026 Accepted |
+| Dialog Layer | 已实现 | Early/Confirmed Dialog、fork、Route Set、Remote Target、CSeq 和 2xx ACK |
+| 基本呼叫 | 已实现 | INVITE、ACK、re-INVITE、BYE、CANCEL 及真实 UDP 完整流程 |
+| TCP/TLS Transport | 下一里程碑 | 流式分帧、连接复用、TLS、连接失败传播和资源限制 |
+| Digest Authentication | 后续规划 | 独立认证阶段，不与 Transport 生命周期混合 |
+| Stack API | 后续规划 | 统一组件装配、配置和关闭顺序 |
 
-当前 Parser 接收一条已经完成边界识别的 SIP 报文。TCP 半包、粘包以及同一字节流中的多条消息，将由后续 Transport stream decoder 负责分帧。
+当前 `SipMessageParser` 接收一条已经完成边界识别的 SIP 报文。TCP 半包、粘包以及同一字节流中的多条消息，将由第五阶段的 Transport stream decoder 负责分帧。
 
 ## 目标架构
 
@@ -130,35 +133,42 @@ byte[] encoded = encoder.encode(message);
 org.loomsip
   message       Request、Response、URI、Header、Body 等模型
   codec         SIP Parser、Encoder 和解析资源限制
+  transport     UDP Transport、Endpoint、网络上下文和生命周期
+  transaction   ICT、IST、NICT、NIST、Timer、Dispatcher 和 Repository
+  dialog        Dialog、Route Set、CSeq、ACK、re-INVITE 和 BYE
+  concurrent    Mailbox 和顺序回调派发
 ```
 
-随着里程碑推进，计划增加：
+随着里程碑推进，计划增加或完善：
 
 ```text
 org.loomsip
   api           面向上层业务的公共 API
-  transport     UDP、TCP、TLS 传输及连接管理
-  transaction   SIP 事务、状态机和事务仓库
-  dialog        Dialog 模型、状态管理和仓库
-  concurrent    Mailbox、调度和事件派发
+  transport     TCP/TLS 连接管理、复用和资源限制
   stack         配置、组件装配和生命周期管理
+  auth          Digest 认证策略和 Credential Provider
+  testkit       虚拟网络、场景驱动和协议断言
 ```
 
 接口稳定后，再评估拆分为 `loomsip-core`、`loomsip-transport-netty`、`loomsip-testkit` 和 `loomsip-examples` 等独立 module。
 
 ## 路线图
 
-1. **协议基础**：消息模型、Parser、Encoder、UDP Transport 和 Stack 生命周期。
-2. **事务层**：Transaction ID、Mailbox、Dispatcher、四类状态机、Timer、ACK/CANCEL 关联规则。
-3. **Dialog 与基本呼叫**：Early/Confirmed Dialog，以及 INVITE、ACK、BYE、CANCEL 完整流程。
-4. **可靠传输与安全**：TCP 分帧、连接复用、TLS、资源限制和 Digest Authentication。
-5. **扩展能力**：RFC 3263 DNS、WebSocket、测试工具、指标、追踪和诊断能力。
+1. **协议基础（已完成）**：消息模型、Parser、Encoder 和 UDP Transport。
+2. **事务层（已完成）**：Transaction ID、Mailbox、Dispatcher、四类状态机、Timer、ACK/CANCEL 关联规则。
+3. **Dialog 与基本呼叫（已完成）**：Early/Confirmed Dialog，以及 INVITE、ACK、re-INVITE、BYE、CANCEL 完整流程。
+4. **可靠传输（下一里程碑）**：TCP/TLS 分帧、连接复用、失败传播和资源限制。
+5. **认证与 SIP 扩展**：Digest、PRACK/100rel、UPDATE、Session Timer、REFER 和 INFO。
+6. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
 
 ## 文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)：总体分层、并发模型、协议边界与完整实施路线。
 - [MILESTONE-01-MESSAGE-CODEC.md](MILESTONE-01-MESSAGE-CODEC.md)：消息模型与 Codec 的实现范围和验收标准。
 - [MILESTONE-02-NETTY-UDP-TRANSPORT.md](MILESTONE-02-NETTY-UDP-TRANSPORT.md)：Netty UDP Transport 的详细设计。
+- [MILESTONE-03-TRANSACTION-LAYER.md](MILESTONE-03-TRANSACTION-LAYER.md)：Transaction、Timer、ACK 和 CANCEL 的详细设计。
+- [MILESTONE-04-DIALOG-LAYER.md](MILESTONE-04-DIALOG-LAYER.md)：Dialog、2xx ACK、re-INVITE、BYE 和基本呼叫设计。
+- [MILESTONE-05-RELIABLE-TRANSPORT.md](MILESTONE-05-RELIABLE-TRANSPORT.md)：TCP/TLS 分帧、连接复用、安全和资源限制方案。
 - [CONTRIBUTING.md](CONTRIBUTING.md)：开发约定与公共 API Javadoc 要求。
 
 ## 贡献约定

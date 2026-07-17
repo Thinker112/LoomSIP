@@ -339,14 +339,20 @@ public interface SipStack extends AutoCloseable {
 - 简单 UAC/UAS 示例。
 - INVITE、ACK、BYE、CANCEL 完整场景测试。
 
-### 阶段四：可靠传输与安全
+### 阶段四：可靠传输
 
 - TCP 分帧、连接复用和失败处理。
 - TLS Transport。
 - 消息及连接资源限制。
-- Digest Authentication。
 
-### 阶段五：扩展能力
+### 阶段五：认证与 SIP 扩展
+
+- Digest Authentication。
+- PRACK/100rel。
+- UPDATE 和 Session Timer。
+- REFER、INFO 和 Offer/Answer 辅助能力。
+
+### 阶段六：扩展能力
 
 - RFC 3263 DNS 解析和目标选择。
 - Registrar、Proxy 等示例或独立组件。
