@@ -4,12 +4,16 @@ import org.loomsip.concurrent.MailboxClosedException;
 import org.loomsip.concurrent.SerialMailbox;
 import org.loomsip.message.SipMessage;
 import org.loomsip.message.SipMethod;
+import org.loomsip.message.SipBody;
+import org.loomsip.message.SipHeaders;
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipResponse;
 import org.loomsip.message.header.CSeqHeaderValue;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
 import org.loomsip.transaction.TransportReliability;
+import org.loomsip.transaction.invite.InviteClientHandle;
+import org.loomsip.transaction.noninvite.ClientTransactionHandle;
 import org.loomsip.transaction.tu.TuCallbackDispatcher;
 import org.loomsip.transport.TransportContext;
 import org.loomsip.transport.TransportEndpoint;
@@ -52,6 +56,7 @@ public final class SipDialog implements DialogHandle {
     private final DialogLifecycleListener listener;
     private final Consumer<? super SipDialog> terminationCallback;
     private final DialogRuntime runtime;
+    private final DialogRequestRuntime requestRuntime;
     private final DialogTimerManager timers;
     private final CompletableFuture<Void> terminated = new CompletableFuture<>();
     private final Map<DialogInviteKey, DialogAckTransmission> uacAcks = new HashMap<>();
@@ -76,6 +81,7 @@ public final class SipDialog implements DialogHandle {
                 config,
                 listener,
                 terminationCallback,
+                null,
                 null
         );
     }
@@ -87,12 +93,14 @@ public final class SipDialog implements DialogHandle {
             DialogConfig config,
             DialogLifecycleListener listener,
             Consumer<? super SipDialog> terminationCallback,
-            DialogRuntime runtime
+            DialogRuntime runtime,
+            DialogRequestRuntime requestRuntime
     ) {
         snapshot = Objects.requireNonNull(initialSnapshot, "initialSnapshot");
         this.listener = Objects.requireNonNull(listener, "listener");
         this.terminationCallback = Objects.requireNonNull(terminationCallback, "terminationCallback");
         this.runtime = runtime;
+        this.requestRuntime = requestRuntime;
         Objects.requireNonNull(config, "config");
         mailbox = new SerialMailbox<>(
                 Objects.requireNonNull(dialogExecutor, "dialogExecutor"),
@@ -130,6 +138,37 @@ public final class SipDialog implements DialogHandle {
         return terminated.minimalCompletionStage();
     }
 
+    @Override
+    public CompletionStage<InviteClientHandle> sendReInvite(
+            SipHeaders additionalHeaders,
+            SipBody body
+    ) {
+        DialogRequestRuntime selected = requestRuntime;
+        if (selected == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "Dialog request runtime is not configured"
+            ));
+        }
+        return prepareRequest(SipMethod.INVITE, additionalHeaders, body)
+                .thenCompose(selected::sendInvite);
+    }
+
+    @Override
+    public CompletionStage<ClientTransactionHandle> sendBye() {
+        DialogRequestRuntime selected = requestRuntime;
+        if (selected == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "Dialog request runtime is not configured"
+            ));
+        }
+        return prepareRequest(SipMethod.BYE, SipHeaders.empty(), SipBody.empty())
+                .thenCompose(selected::sendNonInvite)
+                .thenCompose(transaction -> transitionTo(
+                        DialogState.TERMINATED,
+                        DialogTerminationReason.LOCAL_BYE
+                ).thenApply(ignored -> transaction));
+    }
+
     CompletionStage<Void> transitionTo(DialogState target, DialogTerminationReason reason) {
         CompletableFuture<Void> result = new CompletableFuture<>();
         submit(new DialogStateTransition(target, reason, result), result);
@@ -151,6 +190,22 @@ public final class SipDialog implements DialogHandle {
     CompletionStage<Void> acceptRemoteSequence(long sequenceNumber) {
         CompletableFuture<Void> result = new CompletableFuture<>();
         submit(new DialogRemoteSequenceReceived(sequenceNumber, result), result);
+        return result.minimalCompletionStage();
+    }
+
+    CompletionStage<Void> receiveInDialogRequest(SipRequest request) {
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        submit(new DialogInDialogRequestReceived(request, result), result);
+        return result.minimalCompletionStage();
+    }
+
+    private CompletionStage<DialogPreparedRequest> prepareRequest(
+            SipMethod method,
+            SipHeaders additionalHeaders,
+            SipBody body
+    ) {
+        CompletableFuture<DialogPreparedRequest> result = new CompletableFuture<>();
+        submit(new DialogRequestRequested(method, additionalHeaders, body, result), result);
         return result.minimalCompletionStage();
     }
 
@@ -216,6 +271,10 @@ public final class SipDialog implements DialogHandle {
             handleLocalSequenceRequest(request);
         } else if (event instanceof DialogRemoteSequenceReceived received) {
             handleRemoteSequence(received);
+        } else if (event instanceof DialogRequestRequested requested) {
+            handleRequestRequested(requested);
+        } else if (event instanceof DialogInDialogRequestReceived received) {
+            handleInDialogRequest(received);
         } else if (event instanceof DialogUacSuccessReceived success) {
             handleUacSuccess(success);
         } else if (event instanceof DialogUacExchangeReleased released) {
@@ -487,6 +546,107 @@ public final class SipDialog implements DialogHandle {
                 snapshot.remoteTarget()
         );
         event.result().complete(null);
+    }
+
+    private void handleRequestRequested(DialogRequestRequested event) {
+        if (!ensureActive(event.result())) {
+            return;
+        }
+        if (requestRuntime == null || runtime == null) {
+            event.result().completeExceptionally(new IllegalStateException(
+                    "Dialog request runtime is not configured"
+            ));
+            return;
+        }
+        if (snapshot.state() != DialogState.CONFIRMED) {
+            event.result().completeExceptionally(new IllegalStateException(
+                    "in-Dialog requests require a confirmed Dialog"
+            ));
+            return;
+        }
+        if (snapshot.localCSeq() == CSeqHeaderValue.MAX_SEQUENCE_NUMBER) {
+            event.result().completeExceptionally(new IllegalStateException("Local CSeq is exhausted"));
+            return;
+        }
+        try {
+            long next = Math.incrementExact(snapshot.localCSeq());
+            DialogPreparedRequest prepared = DialogRequests.create(
+                    snapshot,
+                    new DialogRoutePlanner().plan(snapshot),
+                    requestRuntime.profile(),
+                    event.method(),
+                    next,
+                    event.additionalHeaders(),
+                    event.body(),
+                    runtime.nextBranch()
+            );
+            updateSnapshot(snapshot.state(), next, snapshot.remoteCSeq(), snapshot.remoteTarget());
+            event.result().complete(prepared);
+        } catch (Throwable cause) {
+            event.result().completeExceptionally(cause);
+        }
+    }
+
+    private void handleInDialogRequest(DialogInDialogRequestReceived event) {
+        if (snapshot.state() != DialogState.CONFIRMED) {
+            event.result().completeExceptionally(new DialogRequestRejectedException(
+                    481,
+                    "Call/Transaction Does Not Exist",
+                    "in-Dialog request requires a confirmed active Dialog"
+            ));
+            return;
+        }
+        try {
+            SipRequest request = event.request();
+            if (!SipMethod.INVITE.equals(request.method()) && !SipMethod.BYE.equals(request.method())) {
+                throw new DialogRequestRejectedException(
+                        405,
+                        "Method Not Allowed",
+                        "4D supports only inbound re-INVITE and BYE"
+                );
+            }
+            if (!id().equals(DialogId.from(request.headers(), DialogRole.UAS))) {
+                throw new DialogRequestRejectedException(
+                        481,
+                        "Call/Transaction Does Not Exist",
+                        "request does not match the local Dialog identity"
+                );
+            }
+            CSeqHeaderValue cseq = SipHeaderValues.cseq(request.headers());
+            if (!request.method().equals(cseq.method()) || cseq.sequenceNumber() <= snapshot.remoteCSeq()) {
+                throw new DialogRequestRejectedException(
+                        500,
+                        "Server Internal Error",
+                        "remote CSeq must match the method and increase monotonically"
+                );
+            }
+            Optional<org.loomsip.message.SipUri> remoteTarget = snapshot.remoteTarget();
+            if (SipMethod.INVITE.equals(request.method())) {
+                java.util.List<org.loomsip.message.header.ContactHeaderValue> contacts =
+                        org.loomsip.message.header.DialogHeaderValues.contacts(request.headers());
+                if (contacts.size() != 1 || contacts.getFirst().isWildcard()) {
+                    throw new DialogRequestRejectedException(
+                            400,
+                            "Bad Request",
+                            "target-refresh request requires one non-wildcard Contact"
+                    );
+                }
+                remoteTarget = Optional.of(contacts.getFirst().address().orElseThrow().uri());
+            }
+            updateSnapshot(snapshot.state(), snapshot.localCSeq(), cseq.sequenceNumber(), remoteTarget);
+            if (SipMethod.BYE.equals(request.method())) {
+                terminate(DialogTerminationReason.REMOTE_BYE);
+            }
+            event.result().complete(null);
+        } catch (DialogRequestRejectedException cause) {
+            event.result().completeExceptionally(cause);
+        } catch (SipHeaderValueException | IllegalArgumentException cause) {
+            event.result().completeExceptionally(new DialogRequestRejectedException(
+                    400,
+                    "Bad Request",
+                    cause.getMessage()
+            ));
+        }
     }
 
     private boolean ensureActive(CompletableFuture<?> result) {

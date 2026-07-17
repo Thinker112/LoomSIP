@@ -1,8 +1,10 @@
 package org.loomsip.dialog;
 
 import org.loomsip.message.SipHeaders;
+import org.loomsip.message.SipMethod;
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipResponse;
+import org.loomsip.message.SipResponses;
 import org.loomsip.message.SipUri;
 import org.loomsip.message.header.CSeqHeaderValue;
 import org.loomsip.message.header.ContactHeaderValue;
@@ -15,6 +17,10 @@ import org.loomsip.transaction.invite.InviteClientHandle;
 import org.loomsip.transaction.invite.InviteClientListener;
 import org.loomsip.transaction.invite.InviteServerHandle;
 import org.loomsip.transaction.invite.InviteServerListener;
+import org.loomsip.transaction.noninvite.ClientTransactionHandle;
+import org.loomsip.transaction.noninvite.NonInviteClientListener;
+import org.loomsip.transaction.noninvite.NonInviteServerListener;
+import org.loomsip.transaction.noninvite.ServerTransactionHandle;
 import org.loomsip.transaction.timer.SipTimer;
 import org.loomsip.transport.TransportContext;
 import org.loomsip.transport.TransportEndpoint;
@@ -56,9 +62,13 @@ public final class DialogTransactionBridge {
     private final DialogManager dialogs;
     private final InviteClientListener clientDelegate;
     private final InviteServerListener serverDelegate;
+    private final NonInviteClientListener nonInviteClientDelegate;
+    private final NonInviteServerListener nonInviteServerDelegate;
     private final DialogRoutePlanner routePlanner = new DialogRoutePlanner();
     private final ClientSide clientSide = new ClientSide();
     private final ServerSide serverSide = new ServerSide();
+    private final NonInviteClientSide nonInviteClientSide = new NonInviteClientSide();
+    private final NonInviteServerSide nonInviteServerSide = new NonInviteServerSide();
     private final ConcurrentHashMap<InviteServerHandle, BridgedServerHandle> serverHandles =
             new ConcurrentHashMap<>();
 
@@ -74,9 +84,44 @@ public final class DialogTransactionBridge {
             InviteClientListener clientDelegate,
             InviteServerListener serverDelegate
     ) {
+        this(
+                dialogs,
+                clientDelegate,
+                serverDelegate,
+                (transaction, response, context) -> {
+                },
+                (transaction, request, context) -> {
+                }
+        );
+    }
+
+    /**
+     * Creates a bridge for INVITE and Non-INVITE application listeners.
+     *
+     * @param dialogs Dialog lifecycle owner
+     * @param clientDelegate application INVITE client listener
+     * @param serverDelegate application INVITE server listener
+     * @param nonInviteClientDelegate application Non-INVITE client listener
+     * @param nonInviteServerDelegate application Non-INVITE server listener
+     */
+    public DialogTransactionBridge(
+            DialogManager dialogs,
+            InviteClientListener clientDelegate,
+            InviteServerListener serverDelegate,
+            NonInviteClientListener nonInviteClientDelegate,
+            NonInviteServerListener nonInviteServerDelegate
+    ) {
         this.dialogs = Objects.requireNonNull(dialogs, "dialogs");
         this.clientDelegate = Objects.requireNonNull(clientDelegate, "clientDelegate");
         this.serverDelegate = Objects.requireNonNull(serverDelegate, "serverDelegate");
+        this.nonInviteClientDelegate = Objects.requireNonNull(
+                nonInviteClientDelegate,
+                "nonInviteClientDelegate"
+        );
+        this.nonInviteServerDelegate = Objects.requireNonNull(
+                nonInviteServerDelegate,
+                "nonInviteServerDelegate"
+        );
     }
 
     /**
@@ -95,6 +140,24 @@ public final class DialogTransactionBridge {
      */
     public InviteServerListener serverListener() {
         return serverSide;
+    }
+
+    /**
+     * Returns the listener installed on the Non-INVITE client transaction manager.
+     *
+     * @return Dialog-aware Non-INVITE client listener
+     */
+    public NonInviteClientListener nonInviteClientListener() {
+        return nonInviteClientSide;
+    }
+
+    /**
+     * Returns the listener installed on the Non-INVITE server transaction manager.
+     *
+     * @return Dialog-aware Non-INVITE server listener
+     */
+    public NonInviteServerListener nonInviteServerListener() {
+        return nonInviteServerSide;
     }
 
     private Optional<DialogHandle> processClientResponse(
@@ -187,7 +250,13 @@ public final class DialogTransactionBridge {
     ) {
         Optional<DialogHandle> existing = dialogs.find(candidate.id());
         DialogHandle dialog = existing.orElseGet(() -> dialogs.create(candidate));
-        if (existing.isEmpty() || dialog.snapshot().state() == DialogState.CONFIRMED) {
+        if (existing.isPresent() && dialog.snapshot().state() == DialogState.CONFIRMED) {
+            if (targetState == DialogState.CONFIRMED) {
+                remoteTarget.ifPresent(target -> await(dialogs.updateRemoteTarget(candidate.id(), target)));
+            }
+            return dialog;
+        }
+        if (existing.isEmpty()) {
             return dialog;
         }
         remoteTarget.ifPresent(target -> await(dialogs.updateRemoteTarget(candidate.id(), target)));
@@ -360,6 +429,55 @@ public final class DialogTransactionBridge {
         );
     }
 
+    private void rejectInDialogRequest(
+            InviteServerHandle transaction,
+            SipRequest request,
+            Throwable cause
+    ) {
+        try {
+            transaction.sendResponse(rejectionResponse(request, cause));
+        } catch (Throwable responseFailure) {
+            reportServerFailure("failed to send in-Dialog request rejection", responseFailure);
+        }
+    }
+
+    private void rejectInDialogRequest(
+            ServerTransactionHandle transaction,
+            SipRequest request,
+            Throwable cause
+    ) {
+        try {
+            transaction.sendResponse(rejectionResponse(request, cause));
+        } catch (Throwable responseFailure) {
+            reportServerFailure("failed to send in-Dialog request rejection", responseFailure);
+        }
+    }
+
+    private static SipResponse rejectionResponse(SipRequest request, Throwable cause)
+            throws SipHeaderValueException {
+        Throwable selected = cause instanceof CompletionException && cause.getCause() != null
+                ? cause.getCause()
+                : cause;
+        int status = selected instanceof DialogRequestRejectedException rejected
+                ? rejected.statusCode()
+                : 500;
+        String reason = selected instanceof DialogRequestRejectedException rejected
+                ? rejected.reasonPhrase()
+                : "Server Internal Error";
+        String localTag = SipHeaderValues.toTag(request.headers()).orElse("loomsip");
+        SipResponse response = SipResponses.createResponse(request, status, reason, localTag);
+        if (status == 500) {
+            return new SipResponse(
+                    response.version(),
+                    response.statusCode(),
+                    response.reasonPhrase(),
+                    response.headers().toBuilder().add("Retry-After", "0").build(),
+                    response.body()
+            );
+        }
+        return response;
+    }
+
     private final class ClientSide implements InviteClientListener {
 
         @Override
@@ -440,6 +558,16 @@ public final class DialogTransactionBridge {
                 SipRequest request,
                 TransportContext context
         ) {
+            try {
+                if (SipHeaderValues.toTag(request.headers()).isPresent()) {
+                    DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
+                    await(dialogs.receiveInDialogRequest(id, request));
+                }
+            } catch (Throwable cause) {
+                rejectInDialogRequest(transaction, request, cause);
+                reportServerFailure("failed to route in-Dialog re-INVITE", cause);
+                return;
+            }
             BridgedServerHandle bridged = new BridgedServerHandle(transaction, request, context);
             BridgedServerHandle existing = serverHandles.putIfAbsent(transaction, bridged);
             serverDelegate.onInvite(existing == null ? bridged : existing, request, context);
@@ -519,6 +647,75 @@ public final class DialogTransactionBridge {
         private InviteServerHandle serverHandle(InviteServerHandle transaction) {
             InviteServerHandle bridged = serverHandles.get(transaction);
             return bridged == null ? transaction : bridged;
+        }
+    }
+
+    private final class NonInviteClientSide implements NonInviteClientListener {
+
+        @Override
+        public void onResponse(
+                ClientTransactionHandle transaction,
+                SipResponse response,
+                TransportContext context
+        ) {
+            nonInviteClientDelegate.onResponse(transaction, response, context);
+        }
+
+        @Override
+        public void onTimeout(ClientTransactionHandle transaction, SipTimer timer) {
+            nonInviteClientDelegate.onTimeout(transaction, timer);
+        }
+
+        @Override
+        public void onTransportFailure(ClientTransactionHandle transaction, Throwable cause) {
+            nonInviteClientDelegate.onTransportFailure(transaction, cause);
+        }
+
+        @Override
+        public void onTerminated(ClientTransactionHandle transaction) {
+            nonInviteClientDelegate.onTerminated(transaction);
+        }
+
+        @Override
+        public void onLayerError(Throwable cause) {
+            nonInviteClientDelegate.onLayerError(cause);
+        }
+    }
+
+    private final class NonInviteServerSide implements NonInviteServerListener {
+
+        @Override
+        public void onRequest(
+                ServerTransactionHandle transaction,
+                SipRequest request,
+                TransportContext context
+        ) {
+            if (SipMethod.BYE.equals(request.method())) {
+                try {
+                    DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
+                    await(dialogs.receiveInDialogRequest(id, request));
+                } catch (Throwable cause) {
+                    rejectInDialogRequest(transaction, request, cause);
+                    reportServerFailure("failed to route in-Dialog BYE", cause);
+                    return;
+                }
+            }
+            nonInviteServerDelegate.onRequest(transaction, request, context);
+        }
+
+        @Override
+        public void onTransportFailure(ServerTransactionHandle transaction, Throwable cause) {
+            nonInviteServerDelegate.onTransportFailure(transaction, cause);
+        }
+
+        @Override
+        public void onTerminated(ServerTransactionHandle transaction) {
+            nonInviteServerDelegate.onTerminated(transaction);
+        }
+
+        @Override
+        public void onLayerError(Throwable cause) {
+            nonInviteServerDelegate.onLayerError(cause);
         }
     }
 

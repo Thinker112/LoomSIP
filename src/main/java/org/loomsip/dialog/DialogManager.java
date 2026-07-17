@@ -49,6 +49,7 @@ public final class DialogManager implements AutoCloseable {
     private final DialogLifecycleListener listener;
     private final DialogRepository repository;
     private final DialogRuntime runtime;
+    private final DialogRequestRuntime requestRuntime;
     private final Executor dialogExecutor;
     private final Executor callbackExecutor;
     private final ExecutorService ownedDialogExecutor;
@@ -75,6 +76,7 @@ public final class DialogManager implements AutoCloseable {
                 newVirtualExecutor("loomsip-dialog-"),
                 newVirtualExecutor("loomsip-dialog-tu-"),
                 true,
+                null,
                 null
         );
     }
@@ -98,7 +100,32 @@ public final class DialogManager implements AutoCloseable {
                 newVirtualExecutor("loomsip-dialog-"),
                 newVirtualExecutor("loomsip-dialog-tu-"),
                 true,
-                Objects.requireNonNull(runtime, "runtime")
+                Objects.requireNonNull(runtime, "runtime"),
+                null
+        );
+    }
+
+    /**
+     * Creates a manager with reliability and in-Dialog request services.
+     *
+     * @param config Dialog capacities
+     * @param listener ordered lifecycle listener
+     * @param requestRuntime externally owned request runtime
+     */
+    public DialogManager(
+            DialogConfig config,
+            DialogLifecycleListener listener,
+            DialogRequestRuntime requestRuntime
+    ) {
+        this(
+                config,
+                listener,
+                new InMemoryDialogRepository(config.dialogs()),
+                newVirtualExecutor("loomsip-dialog-"),
+                newVirtualExecutor("loomsip-dialog-tu-"),
+                true,
+                Objects.requireNonNull(requestRuntime, "requestRuntime").dialogRuntime(),
+                requestRuntime
         );
     }
 
@@ -118,7 +145,7 @@ public final class DialogManager implements AutoCloseable {
             Executor dialogExecutor,
             Executor callbackExecutor
     ) {
-        this(config, listener, repository, dialogExecutor, callbackExecutor, false, null);
+        this(config, listener, repository, dialogExecutor, callbackExecutor, false, null, null);
     }
 
     /**
@@ -146,7 +173,38 @@ public final class DialogManager implements AutoCloseable {
                 dialogExecutor,
                 callbackExecutor,
                 false,
-                Objects.requireNonNull(runtime, "runtime")
+                Objects.requireNonNull(runtime, "runtime"),
+                null
+        );
+    }
+
+    /**
+     * Creates a manager with external repository, executors, and request runtime.
+     *
+     * @param config Dialog capacities
+     * @param listener ordered lifecycle listener
+     * @param repository externally owned Dialog repository
+     * @param dialogExecutor state executor
+     * @param callbackExecutor TU callback executor
+     * @param requestRuntime externally owned request runtime
+     */
+    public DialogManager(
+            DialogConfig config,
+            DialogLifecycleListener listener,
+            DialogRepository repository,
+            Executor dialogExecutor,
+            Executor callbackExecutor,
+            DialogRequestRuntime requestRuntime
+    ) {
+        this(
+                config,
+                listener,
+                repository,
+                dialogExecutor,
+                callbackExecutor,
+                false,
+                Objects.requireNonNull(requestRuntime, "requestRuntime").dialogRuntime(),
+                requestRuntime
         );
     }
 
@@ -157,12 +215,14 @@ public final class DialogManager implements AutoCloseable {
             Executor dialogExecutor,
             Executor callbackExecutor,
             boolean ownsExecutors,
-            DialogRuntime runtime
+            DialogRuntime runtime,
+            DialogRequestRuntime requestRuntime
     ) {
         this.config = Objects.requireNonNull(config, "config");
         this.listener = Objects.requireNonNull(listener, "listener");
         this.repository = Objects.requireNonNull(repository, "repository");
         this.runtime = runtime;
+        this.requestRuntime = requestRuntime;
         this.dialogExecutor = Objects.requireNonNull(dialogExecutor, "dialogExecutor");
         this.callbackExecutor = Objects.requireNonNull(callbackExecutor, "callbackExecutor");
         if (repository.capacity() < config.dialogs()) {
@@ -190,7 +250,8 @@ public final class DialogManager implements AutoCloseable {
                     config,
                     listener,
                     this::dialogTerminated,
-                    runtime
+                    runtime,
+                    requestRuntime
             ));
         }
     }
@@ -273,6 +334,18 @@ public final class DialogManager implements AutoCloseable {
      */
     java.util.concurrent.CompletionStage<Void> acceptRemoteSequence(DialogId id, long sequenceNumber) {
         return requireDialog(id).acceptRemoteSequence(sequenceNumber);
+    }
+
+    CompletionStage<Void> receiveInDialogRequest(DialogId id, SipRequest request) {
+        Optional<DialogHandle> selected = find(id);
+        if (selected.isEmpty()) {
+            return CompletableFuture.failedFuture(new DialogRequestRejectedException(
+                    481,
+                    "Call/Transaction Does Not Exist",
+                    "unknown Dialog: " + id
+            ));
+        }
+        return ((SipDialog) selected.orElseThrow()).receiveInDialogRequest(request);
     }
 
     CompletionStage<DialogAckTransmission> prepareUacAck(

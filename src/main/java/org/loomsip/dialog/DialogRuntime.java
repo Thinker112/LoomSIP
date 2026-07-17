@@ -146,6 +146,23 @@ public record DialogRuntime(
         return result.minimalCompletionStage();
     }
 
+    <T> CompletionStage<T> execute(ThrowingSupplier<? extends T> action) {
+        Objects.requireNonNull(action, "action");
+        CompletableFuture<T> result = new CompletableFuture<>();
+        try {
+            transportExecutor.execute(() -> {
+                try {
+                    result.complete(action.get());
+                } catch (Throwable cause) {
+                    result.completeExceptionally(cause);
+                }
+            });
+        } catch (Throwable cause) {
+            result.completeExceptionally(cause);
+        }
+        return result.minimalCompletionStage();
+    }
+
     String nextBranch() {
         String branch = Objects.requireNonNull(branchSupplier.get(), "branchSupplier result");
         if (!branch.regionMatches(
@@ -162,5 +179,10 @@ public record DialogRuntime(
             throw new IllegalStateException("Dialog Via branch must start with z9hG4bK and contain ASCII tokens");
         }
         return branch;
+    }
+
+    @FunctionalInterface
+    interface ThrowingSupplier<T> {
+        T get() throws Exception;
     }
 }

@@ -365,12 +365,60 @@ stop retransmission
 
 ### 4D：Dialog 内请求与基本呼叫
 
+实施状态：已完成（2026-07-17）。
+
 - Local/Remote CSeq 管理。
 - re-INVITE 和 BYE。
 - loose/strict routing。
 - target-refresh。
 - Dialog 终止和资源清理。
 - 真实 UDP 完整呼叫测试。
+
+已实现组件和规则：
+
+- `DialogHandle.sendReInvite(...)` 和 `sendBye()` 只提交命令，不在调用线程直接读写 Dialog 状态。
+- `DialogRequestRequested` 在 Dialog Mailbox 内完成状态校验、Local CSeq 递增、Via branch 生成、From/To/Call-ID/CSeq/Route 构造和不可变请求生成。
+- `DialogRequestRuntime` 将已经构造好的请求交给 `DialogTargetResolver` 和 `DialogRequestDispatcher`；ICT/NICT 创建在 Mailbox 外执行，避免 Transaction sender 同步回调重入 Dialog。
+- `DialogRequestProfile` 明确本地 Via sent-by、Via transport、目标解析 transport 和 UDP `rport` 规则；secure Dialog 只能使用 TLS profile。
+- re-INVITE 使用同一 Dialog ID 和新 Local CSeq，响应中的 Contact 只更新 Remote Target，不修改 Route Set。
+- 入站 re-INVITE/BYE 由 `DialogTransactionBridge` 从 server transaction 路由到 Dialog Mailbox；Dialog 校验 To/From tag、Method、CSeq 单调性后再允许 Bridge 通知应用。
+- 入站 re-INVITE 的单个非 wildcard Contact 执行 target-refresh；入站 BYE 校验成功后以 `REMOTE_BYE` 终止 Dialog。
+- 无法匹配 Dialog 返回 `481`，Remote CSeq 回退或重复返回 `500`/`Retry-After: 0`，非法 target-refresh Contact 返回 `400`；被拒绝请求不会进入应用回调。
+- 出站 BYE 在 NICT 成功创建后以 `LOCAL_BYE` 终止本端 Dialog；Transaction 自身继续负责 BYE 200/超时和清理。
+- Dialog 终止统一取消 Timer、清理 ACK/2xx 和请求状态、移除 Repository 索引，并拒绝后续 Dialog 命令。
+
+4D 组件关系：
+
+```mermaid
+sequenceDiagram
+    participant TU as Application / TU
+    participant D as Dialog Mailbox
+    participant R as DialogRoutePlanner
+    participant X as DialogRequestRuntime
+    participant TM as Transaction Manager
+    participant N as Netty Transport
+    participant B as DialogTransactionBridge
+
+    TU->>D: sendReInvite / sendBye
+    D->>D: validate state and increment Local CSeq
+    D->>R: build route plan
+    R-->>D: immutable request + Next-Hop
+    D-->>X: prepared request
+    X->>X: resolve Next-Hop
+    X->>TM: create ICT or NICT
+    TM->>N: send request
+    N-->>TM: response or inbound request
+    TM-->>B: ordered transaction event
+    B-->>D: target refresh, Remote CSeq, or BYE event
+```
+
+验证覆盖：
+
+- `DialogInDialogRequestTest` 覆盖 loose/strict 路由、受管头保护、CSeq 单调分配、并发 re-INVITE、Remote CSeq、target-refresh 和双向 BYE 清理。
+- `DialogBasicCallUdpIntegrationTest` 使用两个真实 `NettyUdpTransport` 回环端点验证 `INVITE -> 200 -> ACK -> re-INVITE -> 200 -> ACK -> BYE -> 200` 完整呼叫。
+- 全量回归继续覆盖 4A-4C 的 Dialog、Transaction、Mailbox、Timer 和 UDP Transport 行为。
+
+4D 不实现 UPDATE、PRACK/100rel、Session Timer、REFER、INFO 或通用 Dialog 内方法扩展；这些留待后续阶段。
 
 ## 4. 分层与组件关系
 
@@ -497,7 +545,7 @@ Call-ID + local tag
 
 ### 4.4 Dialog 内请求的路由路径
 
-4A 只完成规划和解析边界，Transaction 创建在后续 Dialog 内请求阶段使用：
+Dialog Route Planner 和 Target Resolver 已完成规划/解析边界，4D 通过 `DialogRequestRuntime` 创建后续 Dialog 内 Transaction：
 
 ```text
 DialogSnapshot
@@ -583,6 +631,7 @@ flowchart LR
         RP[DialogRoutePlanner]
         TR[DialogTargetResolver]
         RT[DialogRuntime]
+        RR[DialogRequestRuntime]
         IO[Dialog Transport Executor]
     end
 
@@ -610,7 +659,10 @@ flowchart LR
     TR -->|TransportEndpoint| IO
     RT -->|known response target| IO
     IO -->|Dialog-owned transport write| N
-    S -.->|4D create transaction| TM
+    S -->|prepared 4D request| RR
+    RR --> TR
+    TR -->|resolved request target| RR
+    RR -->|create ICT / NICT| TM
     TM -->|transaction-owned request / response| N
 
     SCH -.->|timer event| X
@@ -643,7 +695,7 @@ INVITE     ACK      re-INVITE      INFO       BYE
 
 ## 5. 代码组织
 
-建议增加：
+当前实现：
 
 ```text
 org.loomsip.dialog
@@ -660,6 +712,10 @@ org.loomsip.dialog
   DialogTransactionBridge
   DialogRoutePlanner
   DialogTargetResolver
+  DialogRequestProfile
+  DialogRequestDispatcher
+  DialogRequestRuntime
+  DialogRequests
   DialogTimer
 
 org.loomsip.message.header
@@ -1186,7 +1242,7 @@ UPDATE 也属于 target-refresh，但不在本阶段实现完整流程。
 - 拒绝新的 sendRequest 命令。
 - 完成所有已返回给调用方的异步结果。
 
-## 20. 公共 API 初步边界
+## 20. 公共 API 边界
 
 ```java
 public interface DialogHandle {
@@ -1195,8 +1251,7 @@ public interface DialogHandle {
 
     DialogSnapshot snapshot();
 
-    CompletionStage<ClientTransactionHandle> sendRequest(
-            SipMethod method,
+    CompletionStage<InviteClientHandle> sendReInvite(
             SipHeaders additionalHeaders,
             SipBody body
     );
@@ -1209,7 +1264,7 @@ public interface DialogHandle {
 
 Handle 方法只向 Dialog Mailbox 投递命令，不能由调用线程直接增加 CSeq 或修改 Route Set。
 
-建议应用回调携带 Dialog：
+后续通用 Dialog Listener 可以在现有 Transaction Listener Adapter 之上继续收口，例如：
 
 ```java
 public interface DialogListener {
@@ -1224,7 +1279,7 @@ public interface DialogListener {
 }
 ```
 
-具体 Handle 类型需要在 4A 实现前结合现有 INVITE/Non-INVITE Handle 再做一次 API 收口，避免把阶段性实现类暴露为长期兼容契约。
+4D 当前保留 `InviteClientHandle` 和 Non-INVITE `ClientTransactionHandle` 两种强类型返回值，不引入缺少状态语义的通用 Object Handle。JAIN-SIP 兼容继续留给后续 Adapter。
 
 ## 21. 生命周期和资源所有权
 
