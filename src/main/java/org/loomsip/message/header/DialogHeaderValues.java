@@ -27,6 +27,28 @@ public final class DialogHeaderValues {
     }
 
     /**
+     * Parses the single From address.
+     *
+     * @param headers message headers
+     * @return typed From address
+     * @throws SipHeaderValueException if the field is absent, duplicated, or malformed
+     */
+    public static AddressHeaderValue fromAddress(SipHeaders headers) throws SipHeaderValueException {
+        return singleAddress(headers, "From");
+    }
+
+    /**
+     * Parses the single To address.
+     *
+     * @param headers message headers
+     * @return typed To address
+     * @throws SipHeaderValueException if the field is absent, duplicated, or malformed
+     */
+    public static AddressHeaderValue toAddress(SipHeaders headers) throws SipHeaderValueException {
+        return singleAddress(headers, "To");
+    }
+
+    /**
      * Parses every Contact list entry in wire order.
      *
      * @param headers message headers
@@ -85,5 +107,21 @@ public final class DialogHeaderValues {
             }
         }
         return List.copyOf(values);
+    }
+
+    private static AddressHeaderValue singleAddress(SipHeaders headers, String name)
+            throws SipHeaderValueException {
+        Objects.requireNonNull(headers, "headers");
+        List<SipHeader> fields = headers.all(name);
+        if (fields.size() != 1) {
+            throw new SipHeaderValueException(
+                    name + " must appear exactly once but appeared " + fields.size() + " times"
+            );
+        }
+        List<String> values = AddressHeaderParser.splitList(fields.getFirst().value(), name);
+        if (values.size() != 1) {
+            throw new SipHeaderValueException(name + " must contain exactly one address");
+        }
+        return AddressHeaderParser.parseAddress(values.getFirst(), name);
     }
 }

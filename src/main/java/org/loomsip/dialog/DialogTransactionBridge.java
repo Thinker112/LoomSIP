@@ -1,0 +1,495 @@
+package org.loomsip.dialog;
+
+import org.loomsip.message.SipHeaders;
+import org.loomsip.message.SipRequest;
+import org.loomsip.message.SipResponse;
+import org.loomsip.message.SipUri;
+import org.loomsip.message.header.CSeqHeaderValue;
+import org.loomsip.message.header.ContactHeaderValue;
+import org.loomsip.message.header.DialogHeaderValues;
+import org.loomsip.message.header.RecordRouteHeaderValue;
+import org.loomsip.message.header.SipHeaderValueException;
+import org.loomsip.message.header.SipHeaderValues;
+import org.loomsip.transaction.invite.InviteClientHandle;
+import org.loomsip.transaction.invite.InviteClientListener;
+import org.loomsip.transaction.invite.InviteServerHandle;
+import org.loomsip.transaction.invite.InviteServerListener;
+import org.loomsip.transaction.timer.SipTimer;
+import org.loomsip.transport.TransportContext;
+
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Ordered bridge from INVITE transaction callbacks to Dialog lifecycle state.
+ *
+ * <p>The bridge exposes separate client and server listener adapters. The
+ * application listeners remain outside Dialog Mailboxes, while every state
+ * mutation is submitted through {@link DialogManager}.</p>
+ *
+ * <pre>{@code
+ * ICT callback --> client adapter --> DialogManager / Mailbox
+ *                                          |
+ *                                          v
+ *                              application client listener
+ *
+ * application server thread(s)
+ *              |
+ *              v
+ * wrapped IST handle / response monitor
+ *              |
+ *              +--> DialogManager / Mailbox -- update completed --+
+ *                                                               |
+ *                                                               v
+ *                                                     IST Mailbox / Transport
+ * }</pre>
+ */
+public final class DialogTransactionBridge {
+
+    private final DialogManager dialogs;
+    private final InviteClientListener clientDelegate;
+    private final InviteServerListener serverDelegate;
+    private final DialogRoutePlanner routePlanner = new DialogRoutePlanner();
+    private final ClientSide clientSide = new ClientSide();
+    private final ServerSide serverSide = new ServerSide();
+    private final ConcurrentHashMap<InviteServerHandle, BridgedServerHandle> serverHandles =
+            new ConcurrentHashMap<>();
+
+    /**
+     * Creates a bridge around application-level INVITE listeners.
+     *
+     * @param dialogs Dialog lifecycle owner
+     * @param clientDelegate application client listener
+     * @param serverDelegate application server listener
+     */
+    public DialogTransactionBridge(
+            DialogManager dialogs,
+            InviteClientListener clientDelegate,
+            InviteServerListener serverDelegate
+    ) {
+        this.dialogs = Objects.requireNonNull(dialogs, "dialogs");
+        this.clientDelegate = Objects.requireNonNull(clientDelegate, "clientDelegate");
+        this.serverDelegate = Objects.requireNonNull(serverDelegate, "serverDelegate");
+    }
+
+    /**
+     * Returns the listener installed on the INVITE client transaction manager.
+     *
+     * @return Dialog-aware client listener
+     */
+    public InviteClientListener clientListener() {
+        return clientSide;
+    }
+
+    /**
+     * Returns the listener installed on the INVITE server transaction manager.
+     *
+     * @return Dialog-aware server listener
+     */
+    public InviteServerListener serverListener() {
+        return serverSide;
+    }
+
+    private Optional<DialogHandle> processClientResponse(
+            SipRequest invite,
+            SipResponse response
+    ) throws SipHeaderValueException {
+        validateResponseCorrelation(invite, response);
+        int status = response.statusCode();
+        if (status == 100 || status < 200 && SipHeaderValues.toTag(response.headers()).isEmpty()) {
+            return Optional.empty();
+        }
+        if (status >= 300) {
+            cleanupClientEarlyDialogs(invite, DialogTerminationReason.NON_SUCCESS_FINAL_RESPONSE);
+            return Optional.empty();
+        }
+        if (status >= 200 || status > 100) {
+            DialogId id = DialogId.from(response.headers(), DialogRole.UAC);
+            Optional<SipUri> remoteTarget = contactUri(
+                    response.headers(),
+                    status >= 200,
+                    "dialog-forming INVITE response"
+            );
+            DialogState targetState = status < 200 ? DialogState.EARLY : DialogState.CONFIRMED;
+            return Optional.of(createOrUpdateDialog(
+                    uacSnapshot(invite, response, id, targetState, remoteTarget),
+                    remoteTarget,
+                    targetState
+            ));
+        }
+        return Optional.empty();
+    }
+
+    private Optional<DialogHandle> processServerResponse(
+            BridgedServerHandle transaction,
+            SipResponse response
+    ) throws SipHeaderValueException {
+        SipRequest invite = transaction.invite;
+        validateResponseCorrelation(invite, response);
+        int status = response.statusCode();
+        Optional<String> toTag = SipHeaderValues.toTag(response.headers());
+        if (status == 100 || status < 200 && toTag.isEmpty()) {
+            return Optional.empty();
+        }
+        if (status >= 300) {
+            if (toTag.isPresent()) {
+                DialogId id = DialogId.from(response.headers(), DialogRole.UAS);
+                transaction.dialogIds.add(id);
+                cleanupDialog(id, DialogTerminationReason.NON_SUCCESS_FINAL_RESPONSE);
+            }
+            return Optional.empty();
+        }
+        if (status >= 200 || status > 100) {
+            DialogId id = DialogId.from(response.headers(), DialogRole.UAS);
+            if (status >= 200) {
+                contactUri(
+                        response.headers(),
+                        true,
+                        "dialog-forming INVITE response"
+                );
+            }
+            Optional<SipUri> remoteTarget = contactUri(
+                    invite.headers(),
+                    status >= 200,
+                    "dialog-forming INVITE request"
+            );
+            DialogState targetState = status < 200 ? DialogState.EARLY : DialogState.CONFIRMED;
+            DialogHandle dialog = createOrUpdateDialog(
+                    uasSnapshot(invite, response, id, targetState, remoteTarget),
+                    remoteTarget,
+                    targetState
+            );
+            transaction.dialogIds.add(id);
+            return Optional.of(dialog);
+        }
+        return Optional.empty();
+    }
+
+    private DialogHandle createOrUpdateDialog(
+            DialogSnapshot candidate,
+            Optional<SipUri> remoteTarget,
+            DialogState targetState
+    ) {
+        Optional<DialogHandle> existing = dialogs.find(candidate.id());
+        DialogHandle dialog = existing.orElseGet(() -> dialogs.create(candidate));
+        if (existing.isEmpty() || dialog.snapshot().state() == DialogState.CONFIRMED) {
+            return dialog;
+        }
+        remoteTarget.ifPresent(target -> await(dialogs.updateRemoteTarget(candidate.id(), target)));
+        if (targetState == DialogState.CONFIRMED) {
+            await(dialogs.transition(
+                    candidate.id(),
+                    DialogState.CONFIRMED,
+                    DialogTerminationReason.EXPLICIT
+            ));
+        }
+        return dialog;
+    }
+
+    private DialogSnapshot uacSnapshot(
+            SipRequest invite,
+            SipResponse response,
+            DialogId id,
+            DialogState state,
+            Optional<SipUri> remoteTarget
+    ) throws SipHeaderValueException {
+        CSeqHeaderValue cseq = SipHeaderValues.cseq(invite.headers());
+        List<RecordRouteHeaderValue> recordRoutes = DialogHeaderValues.recordRoutes(response.headers());
+        return new DialogSnapshot(
+                id,
+                DialogRole.UAC,
+                state,
+                DialogHeaderValues.fromAddress(invite.headers()).uri(),
+                DialogHeaderValues.toAddress(response.headers()).uri(),
+                cseq.sequenceNumber(),
+                0,
+                routePlanner.establishRouteSet(DialogRole.UAC, recordRoutes),
+                remoteTarget,
+                isSecure(invite)
+        );
+    }
+
+    private DialogSnapshot uasSnapshot(
+            SipRequest invite,
+            SipResponse response,
+            DialogId id,
+            DialogState state,
+            Optional<SipUri> remoteTarget
+    ) throws SipHeaderValueException {
+        CSeqHeaderValue cseq = SipHeaderValues.cseq(invite.headers());
+        List<RecordRouteHeaderValue> recordRoutes = DialogHeaderValues.recordRoutes(invite.headers());
+        return new DialogSnapshot(
+                id,
+                DialogRole.UAS,
+                state,
+                DialogHeaderValues.toAddress(response.headers()).uri(),
+                DialogHeaderValues.fromAddress(invite.headers()).uri(),
+                0,
+                cseq.sequenceNumber(),
+                routePlanner.establishRouteSet(DialogRole.UAS, recordRoutes),
+                remoteTarget,
+                isSecure(invite)
+        );
+    }
+
+    private void cleanupClientEarlyDialogs(
+            SipRequest invite,
+            DialogTerminationReason reason
+    ) throws SipHeaderValueException {
+        String callId = SipHeaderValues.callId(invite.headers());
+        String localTag = SipHeaderValues.fromTag(invite.headers()).orElseThrow(
+                () -> new SipHeaderValueException("From tag is required for a UAC Dialog Set")
+        );
+        cleanupDialogSet(new DialogSetId(callId, localTag), reason);
+    }
+
+    private void cleanupDialogSet(DialogSetId setId, DialogTerminationReason reason) {
+        dialogs.findBySet(setId).forEach(dialog -> {
+            if (dialog.snapshot().state() == DialogState.EARLY) {
+                cleanupDialog(dialog.id(), reason);
+            }
+        });
+    }
+
+    private void cleanupDialog(DialogId id, DialogTerminationReason reason) {
+        Optional<DialogHandle> selected = dialogs.find(id);
+        if (selected.isPresent() && selected.get().snapshot().state() == DialogState.EARLY) {
+            await(dialogs.transition(id, DialogState.TERMINATED, reason));
+        }
+    }
+
+    private static Optional<SipUri> contactUri(
+            SipHeaders headers,
+            boolean required,
+            String source
+    ) throws SipHeaderValueException {
+        List<ContactHeaderValue> contacts = DialogHeaderValues.contacts(headers);
+        if (contacts.isEmpty()) {
+            if (required) {
+                throw new SipHeaderValueException(source + " requires one Contact");
+            }
+            return Optional.empty();
+        }
+        if (contacts.size() != 1 || contacts.getFirst().isWildcard()) {
+            throw new SipHeaderValueException(source + " must contain one non-wildcard Contact");
+        }
+        return Optional.of(contacts.getFirst().address().orElseThrow().uri());
+    }
+
+    private static void validateResponseCorrelation(SipRequest invite, SipResponse response)
+            throws SipHeaderValueException {
+        CSeqHeaderValue inviteCSeq = SipHeaderValues.cseq(invite.headers());
+        CSeqHeaderValue responseCSeq = SipHeaderValues.cseq(response.headers());
+        if (!inviteCSeq.equals(responseCSeq)
+                || !SipHeaderValues.callId(invite.headers()).equals(
+                        SipHeaderValues.callId(response.headers())
+                )) {
+            throw new SipHeaderValueException("response does not match INVITE CSeq and Call-ID");
+        }
+    }
+
+    private static boolean isSecure(SipRequest invite) {
+        return invite.requestUri().scheme().filter("sips"::equals).isPresent();
+    }
+
+    private static void await(CompletionStage<?> stage) {
+        try {
+            stage.toCompletableFuture().join();
+        } catch (CompletionException exception) {
+            if (exception.getCause() instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw exception;
+        }
+    }
+
+    private void reportClientFailure(String message, Throwable cause) {
+        try {
+            clientDelegate.onLayerError(new DialogBridgeException(message, cause));
+        } catch (Throwable listenerFailure) {
+            logFailure("client Dialog bridge error listener failed", listenerFailure);
+        }
+    }
+
+    private void reportServerFailure(String message, Throwable cause) {
+        try {
+            serverDelegate.onLayerError(new DialogBridgeException(message, cause));
+        } catch (Throwable listenerFailure) {
+            logFailure("server Dialog bridge error listener failed", listenerFailure);
+        }
+    }
+
+    private static void logFailure(String message, Throwable cause) {
+        System.getLogger(DialogTransactionBridge.class.getName()).log(
+                System.Logger.Level.WARNING,
+                message,
+                cause
+        );
+    }
+
+    private final class ClientSide implements InviteClientListener {
+
+        @Override
+        public void onResponse(
+                InviteClientHandle transaction,
+                SipResponse response,
+                TransportContext context
+        ) {
+            try {
+                processClientResponse(transaction.originalRequest(), response);
+            } catch (Throwable cause) {
+                reportClientFailure("failed to bridge INVITE client response", cause);
+            }
+            clientDelegate.onResponse(transaction, response, context);
+        }
+
+        @Override
+        public void onTimeout(InviteClientHandle transaction, SipTimer timer) {
+            clientDelegate.onTimeout(transaction, timer);
+        }
+
+        @Override
+        public void onTransportFailure(InviteClientHandle transaction, Throwable cause) {
+            clientDelegate.onTransportFailure(transaction, cause);
+        }
+
+        @Override
+        public void onTerminated(InviteClientHandle transaction) {
+            try {
+                cleanupClientEarlyDialogs(
+                        transaction.originalRequest(),
+                        DialogTerminationReason.INVITE_TRANSACTION_TERMINATED
+                );
+            } catch (Throwable cause) {
+                reportClientFailure("failed to clean up UAC Early Dialogs", cause);
+            }
+            clientDelegate.onTerminated(transaction);
+        }
+
+        @Override
+        public void onLayerError(Throwable cause) {
+            clientDelegate.onLayerError(cause);
+        }
+    }
+
+    private final class ServerSide implements InviteServerListener {
+
+        @Override
+        public void onInvite(
+                InviteServerHandle transaction,
+                SipRequest request,
+                TransportContext context
+        ) {
+            BridgedServerHandle bridged = new BridgedServerHandle(transaction, request);
+            BridgedServerHandle existing = serverHandles.putIfAbsent(transaction, bridged);
+            serverDelegate.onInvite(existing == null ? bridged : existing, request, context);
+        }
+
+        @Override
+        public void onCancel(
+                InviteServerHandle transaction,
+                SipRequest cancel,
+                TransportContext context
+        ) {
+            serverDelegate.onCancel(serverHandle(transaction), cancel, context);
+        }
+
+        @Override
+        public void onAck(
+                InviteServerHandle transaction,
+                SipRequest ack,
+                TransportContext context
+        ) {
+            serverDelegate.onAck(serverHandle(transaction), ack, context);
+        }
+
+        @Override
+        public void onUnmatchedAck(SipRequest ack, TransportContext context) {
+            serverDelegate.onUnmatchedAck(ack, context);
+        }
+
+        @Override
+        public void onTimeout(InviteServerHandle transaction, SipTimer timer) {
+            serverDelegate.onTimeout(serverHandle(transaction), timer);
+        }
+
+        @Override
+        public void onTransportFailure(InviteServerHandle transaction, Throwable cause) {
+            serverDelegate.onTransportFailure(serverHandle(transaction), cause);
+        }
+
+        @Override
+        public void onTerminated(InviteServerHandle transaction) {
+            BridgedServerHandle bridged = serverHandles.remove(transaction);
+            if (bridged != null) {
+                try {
+                    bridged.dialogIds.forEach(id -> cleanupDialog(
+                            id,
+                            DialogTerminationReason.INVITE_TRANSACTION_TERMINATED
+                    ));
+                } catch (Throwable cause) {
+                    reportServerFailure("failed to clean up UAS Early Dialogs", cause);
+                }
+                serverDelegate.onTerminated(bridged);
+            } else {
+                serverDelegate.onTerminated(transaction);
+            }
+        }
+
+        @Override
+        public void onLayerError(Throwable cause) {
+            serverDelegate.onLayerError(cause);
+        }
+
+        private InviteServerHandle serverHandle(InviteServerHandle transaction) {
+            InviteServerHandle bridged = serverHandles.get(transaction);
+            return bridged == null ? transaction : bridged;
+        }
+    }
+
+    private final class BridgedServerHandle implements InviteServerHandle {
+
+        private final InviteServerHandle delegate;
+        private final SipRequest invite;
+        private final Set<DialogId> dialogIds = ConcurrentHashMap.newKeySet();
+        private final Object responseMonitor = new Object();
+
+        private BridgedServerHandle(InviteServerHandle delegate, SipRequest invite) {
+            this.delegate = Objects.requireNonNull(delegate, "delegate");
+            this.invite = Objects.requireNonNull(invite, "invite");
+        }
+
+        @Override
+        public org.loomsip.transaction.TransactionKey key() {
+            return delegate.key();
+        }
+
+        @Override
+        public org.loomsip.transaction.invite.InviteServerState state() {
+            return delegate.state();
+        }
+
+        @Override
+        public void sendResponse(SipResponse response) {
+            Objects.requireNonNull(response, "response");
+            synchronized (responseMonitor) {
+                try {
+                    processServerResponse(this, response);
+                    delegate.sendResponse(response);
+                } catch (Throwable cause) {
+                    reportServerFailure("failed to bridge INVITE server response", cause);
+                }
+            }
+        }
+
+        @Override
+        public CompletionStage<Void> terminated() {
+            return delegate.terminated();
+        }
+    }
+}

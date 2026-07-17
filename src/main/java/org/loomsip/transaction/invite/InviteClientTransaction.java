@@ -116,6 +116,11 @@ final class InviteClientTransaction extends AbstractInviteTransaction implements
     }
 
     @Override
+    public SipRequest originalRequest() {
+        return invite;
+    }
+
+    @Override
     public CompletionStage<Void> terminated() {
         return terminationStage();
     }

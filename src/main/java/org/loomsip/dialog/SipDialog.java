@@ -148,10 +148,10 @@ public final class SipDialog implements DialogHandle {
         }
         updateSnapshot(event.target(), snapshot.localCSeq(), snapshot.remoteCSeq(), snapshot.remoteTarget());
         notifyTu(() -> listener.onStateChanged(this, current, event.target()));
-        event.result().complete(null);
         if (event.target() == DialogState.TERMINATED) {
             terminate(event.terminationReason());
         }
+        event.result().complete(null);
     }
 
     private void handleRemoteTargetUpdate(DialogRemoteTargetUpdate event) {

@@ -92,11 +92,37 @@ Body 在本阶段继续作为不透明二进制数据传递。
 
 ### 4B：INVITE 与 Dialog 建立
 
+实施状态：已完成（2026-07-17）。
+
 - UAC/UAS Early Dialog。
 - 2xx 确认 Dialog。
 - Forked response 多 Dialog。
 - 非 2xx 和 Timer M 后的 Early Dialog 清理。
 - Transaction/Dialog 事件顺序保证。
+
+已实现组件和规则：
+
+- `InviteClientHandle.originalRequest()` 向 Dialog Layer 暴露不可变原始 INVITE，避免“先收到响应、后注册桥接上下文”的竞态。
+- `DialogTransactionBridge` 提供独立的 ICT/IST Listener Adapter，并将应用 Listener 保留在 Transaction TU Callback 边界之外。
+- UAC 收到带 To tag 的 101-199 后创建 Early Dialog；100 和未带 To tag 的临时响应不创建 Dialog。
+- UAC 收到 2xx 后直接创建或确认对应 Dialog；不同 To tag 形成独立 forked Dialog。
+- UAC Remote Target 来自响应 Contact，Route Set 使用响应 Record-Route 逆序；后续同一 Dialog 响应不重写首次建立的 Route Set。
+- UAS 应用收到包装后的 `InviteServerHandle`；tagged 1xx/2xx 会先建立或更新 Dialog，再把响应提交给 IST 和 Transport。
+- UAS Remote Target 来自初始 INVITE Contact，Route Set 按请求 Record-Route 报文顺序保存。
+- 非 2xx 最终响应终止相关 Early Dialog；ICT Timer M 或 IST Timer L 等 Transaction 终止回调只清理残留 Early Dialog，不删除 Confirmed Dialog。
+- UAC Dialog 解析失败会报告 `DialogBridgeException`，但原始 SIP 响应仍通知应用；UAS 不满足 tag/Contact/相关性要求的 Dialog-forming 响应不会进入 IST 或 Transport。
+- Terminated 转换的命令完成点调整为 Repository 清理之后，确保后续响应发送或应用回调不会观察到残留的已终止条目。
+
+验证覆盖：
+
+- UAC tagged 180/183、Early -> Confirmed、无 Early 的 forked 2xx 和多个 Confirmed Dialog。
+- 虚拟 Timer M 清理未确认 fork，同时保留所有 Confirmed fork。
+- UAC 非 2xx 在应用回调前清理 Early Dialog Set。
+- UAS tagged 1xx/2xx 在 Transport Sender 执行前已经建立对应 Dialog。
+- UAS 非 2xx 清理、Timer L 后保留 Confirmed Dialog，以及缺失 Contact 时阻止非法 2xx 发送。
+- 100、未带 tag 的临时响应和错误桥接头字段。
+
+4B 不生成或路由 2xx ACK，也不接管 UAS 2xx 重传；这些职责从 4C 开始实现。
 
 ### 4C：2xx、ACK 与可靠性
 
@@ -142,6 +168,225 @@ Dialog State / Route / CSeq
         v
 Application / TU
 ```
+
+### 4.1 Dialog 建立路径
+
+UAC 收到响应和 UAS 应用发送响应，分别从两端进入同一个 Dialog 建立边界：
+
+```text
+UAC response                         UAS application response
+      |                                      |
+      v                                      v
+ InviteTransactionManager             wrapped InviteServerHandle
+      |                                      |
+      v                                      v
+ ICT TU callback                     response monitor
+      |                                      |
+      +---------------+----------------------+
+                      v
+             DialogTransactionBridge
+                      |
+                      v
+                DialogManager
+                      |
+                      v
+                DialogRepository
+                      |
+                      v
+                  SipDialog
+                      |
+                      v
+                Dialog Mailbox
+                      |
+                      v
+           Early / Confirmed Snapshot
+                      |
+                      +--> application callback
+                      +--> IST / Transport response send
+```
+
+桥接器先完成 Dialog 身份、Contact、Route Set 和状态处理，再将事件交给下一层。UAC 响应错误会通知应用并报告桥接错误；UAS 不满足建立条件的响应不会发送到 IST。
+
+### 4.2 单 Dialog 事件路径
+
+同一个 Dialog 的所有来源都汇入同一个 FIFO Mailbox：
+
+```text
+ICT / IST callback       Dialog timer       Application command
+         |                    |                     |
+         +--------------------+---------------------+
+                              v
+                    DialogManager command
+                              |
+                              v
+                    +-------------------+
+                    |  Dialog Mailbox   |
+                    |  one drain task   |
+                    +---------+---------+
+                              |
+                              v
+                    SipDialog.handleEvent
+                              |
+              +---------------+----------------+
+              |                                |
+              v                                v
+     State / CSeq / Target              Route / Snapshot
+              |                                |
+              +---------------+----------------+
+                              v
+                    TU Callback Dispatcher
+                              |
+                              v
+                       Application / TU
+```
+
+Dialog Mailbox 只串行化状态修改；TU Callback Dispatcher 独立承载可能阻塞的应用回调。
+
+### 4.3 Fork Dialog 与二级索引
+
+相同 Call-ID 的多个 To tag 不共享完整 Dialog，而是共享一个 Dialog Set：
+
+```text
+Call-ID + local tag
+          |
+          v
+      DialogSetId
+          |
+          v
+   DialogRepository secondary index
+          |
+          +------------------+------------------+
+          v                  v                  v
+       Dialog A           Dialog B           Dialog C
+     remote tag A       remote tag B       remote tag C
+       EARLY            CONFIRMED             EARLY
+```
+
+主索引仍按完整 `DialogId` 查找；非 2xx 或 Timer M 清理时通过 `DialogSetId` 遍历 Early Dialog，不能误删 Confirmed fork。
+
+### 4.4 Dialog 内请求的路由路径
+
+4A 只完成规划和解析边界，Transaction 创建在后续 Dialog 内请求阶段使用：
+
+```text
+DialogSnapshot
+      |
+      v
+DialogRoutePlanner
+      |
+      +--> Request-URI
+      +--> ordered Route headers
+      +--> Next-Hop URI
+                         |
+                         v
+                DialogTargetResolver
+                         |
+                         v
+                 TransportEndpoint
+                         |
+                         v
+                Transaction Manager
+                         |
+                         v
+                    Transport
+```
+
+Loose routing 保留 Remote Target 作为 Request-URI；strict routing 将首个 Route 提升为 Request-URI，并把 Remote Target 追加到 Route 列表末尾。
+
+### 4.5 Dialog 关闭与资源清理
+
+关闭和协议终止都必须经过 Dialog 自身的顺序边界：
+
+```text
+DialogManager.close / termination event
+                  |
+                  v
+          Dialog Mailbox shutdown
+                  |
+                  v
+          SipDialog.terminate
+                  |
+       +----------+-----------+
+       |                      |
+       v                      v
+ Repository remove      Timer / cache cleanup
+       |                      |
+       +----------+-----------+
+                  v
+          TU callback queue drain
+                  |
+                  v
+          Dialog.terminated()
+```
+
+`Dialog.terminated()` 在 Mailbox 关闭、Repository 条目移除和已接受 TU 回调排空后完成；Transaction 的终止只触发 Early Dialog 清理，不自动终止 Confirmed Dialog。
+
+### 4.6 Dialog 与其他组件全景关系
+
+下面的图表示 Dialog Layer 在整个 SIP Stack 中的边界。实线表示事件或命令流，虚线表示查询、定时器和资源生命周期关系：
+
+```mermaid
+flowchart LR
+    subgraph APP[Application Layer]
+        A[Application / TU]
+    end
+
+    subgraph NET[Transport Layer]
+        N[NettyUdpTransport<br/>encode / decode]
+    end
+
+    subgraph TX[Transaction Layer]
+        D[SipTransactionDispatcher]
+        X[ICT / IST<br/>Transaction Mailbox]
+        TM[Transaction Manager]
+    end
+
+    subgraph DL[Dialog Layer]
+        B[DialogTransactionBridge]
+        M[DialogManager]
+        R[DialogRepository<br/>ID / fork index]
+        S[SipDialog<br/>Dialog Mailbox]
+        SNAP[DialogSnapshot]
+        RP[DialogRoutePlanner]
+        TR[DialogTargetResolver]
+    end
+
+    CB[TU Callback Dispatcher]
+    SCH[SipScheduler]
+    CLOSE[Stack close]
+
+    N -->|inbound SIP message| D
+    D --> X
+    X -->|ordered TU event| B
+    B -->|Dialog event| M
+    M --> R
+    R --> S
+    S --> SNAP
+    S --> CB
+    CB -->|ordered callback| A
+    A -->|application command| M
+
+    S --> RP
+    RP -->|Next-Hop URI| TR
+    TR -->|TransportEndpoint| TM
+    TM -->|outbound SIP request / response| N
+
+    SCH -.->|timer event| X
+    SCH -.->|timer event| S
+    CLOSE -.->|stop I/O| N
+    CLOSE -.->|shutdown Dialogs| M
+    CLOSE -.->|shutdown Transactions| X
+```
+
+关键边界如下：
+
+- Transport 只负责网络 I/O、编解码和传递入站消息，不直接修改 Dialog 状态。
+- Transaction 只负责一次请求/响应交换；跨多个 Transaction 的状态由 Dialog Mailbox 串行化。
+- `DialogTransactionBridge` 负责把 Transaction 的有序 TU 事件转换为 Dialog 命令，不能跨 Mailbox 直接写字段。
+- `DialogRoutePlanner` 只计算 SIP 路由，`DialogTargetResolver` 只负责 Next-Hop 到网络端点的解析。
+- Dialog 内请求需要创建新的 Transaction；因此请求方向是 `Dialog Mailbox -> Route/Resolver -> Transaction Manager -> Transport`。
+- Timer 只投递事件，Scheduler 不直接修改 Transaction 或 Dialog 状态。
+- 应用回调从独立 TU Dispatcher 发出，应用阻塞不能占用 Dialog Mailbox 的 drain task。
 
 Dialog 不替代 Transaction。一个 Dialog 内可以连续产生多个独立 Transaction：
 

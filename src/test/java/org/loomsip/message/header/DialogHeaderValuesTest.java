@@ -69,6 +69,21 @@ class DialogHeaderValuesTest {
     }
 
     @Test
+    void parsesSingleFromAndToAddresses() throws Exception {
+        SipHeaders headers = SipHeaders.builder()
+                .add("From", "\"Alice\" <sip:alice@example.com>;tag=from-tag")
+                .add("To", "<sips:bob@example.com>;tag=to-tag")
+                .build();
+
+        assertEquals(SipUri.parse("sip:alice@example.com"),
+                DialogHeaderValues.fromAddress(headers).uri());
+        assertEquals(SipUri.parse("sips:bob@example.com"),
+                DialogHeaderValues.toAddress(headers).uri());
+        assertEquals("from-tag", DialogHeaderValues.fromAddress(headers)
+                .parameter("tag").orElseThrow().value().orElseThrow());
+    }
+
+    @Test
     void rejectsMalformedQuotesAnglesAndEmptyListValues() {
         assertThrows(SipHeaderValueException.class, () -> DialogHeaderValues.contacts(
                 SipHeaders.builder().add("Contact", "\"Alice <sip:alice@example.com>").build()
@@ -78,6 +93,12 @@ class DialogHeaderValuesTest {
         ));
         assertThrows(SipHeaderValueException.class, () -> DialogHeaderValues.recordRoutes(
                 SipHeaders.builder().add("Record-Route", "<sip:one.example.com;lr>,").build()
+        ));
+        assertThrows(SipHeaderValueException.class, () -> DialogHeaderValues.fromAddress(
+                SipHeaders.builder()
+                        .add("From", "<sip:one@example.com>")
+                        .add("From", "<sip:two@example.com>")
+                        .build()
         ));
     }
 }

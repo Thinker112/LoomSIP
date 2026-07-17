@@ -1,5 +1,6 @@
 package org.loomsip.transaction.invite;
 
+import org.loomsip.message.SipRequest;
 import org.loomsip.transaction.TransactionKey;
 
 import java.util.concurrent.CompletionStage;
@@ -13,6 +14,17 @@ public interface InviteClientHandle {
      * @return client transaction identity
      */
     TransactionKey key();
+
+    /**
+     * Returns the immutable INVITE that created this transaction.
+     *
+     * <p>Higher protocol layers use the request to correlate Dialog identity
+     * and routing state without maintaining a registration race beside the
+     * transaction repository.</p>
+     *
+     * @return original INVITE request
+     */
+    SipRequest originalRequest();
 
     /**
      * Returns the latest externally visible state.
