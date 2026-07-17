@@ -5,8 +5,9 @@ import org.loomsip.codec.SipParseException;
 /**
  * Receives decoded messages and transport diagnostics outside the Netty EventLoop.
  *
- * <p>Callbacks may run concurrently for different datagrams. Transaction-level
- * ordering will be added by the dispatcher and mailbox layer in a later milestone.</p>
+ * <p>Callbacks may run concurrently for different datagrams or stream
+ * connections. Transaction and Dialog ordering is provided by their dispatcher
+ * and mailbox layers rather than by the transport callback executor.</p>
  */
 public interface SipMessageHandler {
 
@@ -18,7 +19,7 @@ public interface SipMessageHandler {
     void onMessage(InboundSipMessage message);
 
     /**
-     * Reports a datagram that could not be accepted as a SIP message.
+     * Reports a datagram or stream connection that could not be decoded as SIP.
      *
      * @param context source and destination metadata
      * @param cause parse or configured-size failure

@@ -37,4 +37,14 @@ public record TransportEndpoint(
     public static TransportEndpoint udp(InetSocketAddress address) {
         return new TransportEndpoint(TransportProtocol.UDP, address);
     }
+
+    /**
+     * Creates a TCP endpoint.
+     *
+     * @param address resolved TCP socket address
+     * @return TCP endpoint
+     */
+    public static TransportEndpoint tcp(InetSocketAddress address) {
+        return new TransportEndpoint(TransportProtocol.TCP, address);
+    }
 }

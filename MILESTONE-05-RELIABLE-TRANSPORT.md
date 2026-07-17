@@ -13,7 +13,7 @@
 
 第五阶段在不改变 Transaction/Dialog 串行模型的前提下，引入 TCP/TLS 流式分帧、连接复用、连接失败传播和资源限制。
 
-实施状态：5A 已完成（2026-07-17），5B～5F 待执行。
+实施状态：5A、5B 已完成（2026-07-17），5C～5F 待执行。
 
 ## 2. 阶段目标
 
@@ -221,6 +221,8 @@ release cumulation buffer
 
 ## 6. 5B：TCP Transport 和连接复用
 
+实施状态：已完成（2026-07-17）。
+
 ### 6.1 连接模型
 
 建议增加：
@@ -323,6 +325,29 @@ CompletionStage<SendResult>
 - 远端关闭、RST、写失败和本地关闭。
 - Idle Timeout 清理。
 - Transport close 后连接数归零且所有发送 Stage 完成。
+
+已实现组件：
+
+- `ConnectionKey`：使用协议、本地 bind identity 和远端地址标识可复用连接。
+- `TransportConnectionId`、`ConnectionState`、`TransportConnection`：提供不暴露 Netty `Channel` 的连接视图。
+- `ConnectionLimits`：限制总连接数、单远端连接数、待建连接数，并配置 Connect/Idle Timeout。
+- `ConnectionManager`：合并同一 Key 的并发建连，登记入站/出站连接并在关闭时原子清理。
+- `TcpTransportConfig`：组合监听地址、流缓冲限制和连接限制。
+- `NettyTcpTransport`：TCP Client/Server、连接复用、虚拟线程回调和幂等关闭。
+- `TcpChannelHandler`、`NettyTransportConnection`：处理 Channel 生命周期、入站上下文和写完成 Future。
+
+实现边界：
+
+- 响应发送到入站消息的远端地址时，优先复用该入站连接。
+- 出站连接使用 `ConnectionKey` 合并首次并发建连；失败条目会移除，后续发送可以重试。
+- 单条 TCP 连接的关闭、RST、Idle Timeout 或非法 SIP 流只清理该连接，不关闭 listener。
+- Transport 关闭会拒绝新发送、关闭 listener 和全部 child Channel，并完成所有已返回的发送 Future。
+- 5B 不实现 TLS、Transaction 可靠传输事件桥接和写队列字节上限；分别留到 5C、5D 和 5E。
+
+已验证测试：
+
+- `TcpTransportConfigTest`：2 个默认配置和非法限制场景。
+- `NettyTcpTransportTest`：8 个真实回环、响应复用、并发建连、半包/粘包、拒绝、RST、非法流、Idle 和生命周期场景。
 
 ## 7. 5C：TLS Transport
 
