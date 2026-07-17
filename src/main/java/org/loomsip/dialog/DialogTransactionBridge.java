@@ -10,12 +10,14 @@ import org.loomsip.message.header.DialogHeaderValues;
 import org.loomsip.message.header.RecordRouteHeaderValue;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
+import org.loomsip.transaction.TransportReliability;
 import org.loomsip.transaction.invite.InviteClientHandle;
 import org.loomsip.transaction.invite.InviteClientListener;
 import org.loomsip.transaction.invite.InviteServerHandle;
 import org.loomsip.transaction.invite.InviteServerListener;
 import org.loomsip.transaction.timer.SipTimer;
 import org.loomsip.transport.TransportContext;
+import org.loomsip.transport.TransportEndpoint;
 
 import java.util.List;
 import java.util.Objects;
@@ -165,6 +167,14 @@ public final class DialogTransactionBridge {
                     targetState
             );
             transaction.dialogIds.add(id);
+            if (status >= 200 && dialogs.reliabilityEnabled()) {
+                await(dialogs.registerUasSuccess(
+                        id,
+                        response,
+                        transaction.responseTarget,
+                        transaction.reliability
+                ));
+            }
             return Optional.of(dialog);
         }
         return Optional.empty();
@@ -248,6 +258,20 @@ public final class DialogTransactionBridge {
         cleanupDialogSet(new DialogSetId(callId, localTag), reason);
     }
 
+    private void releaseClientAckCache(SipRequest invite) throws SipHeaderValueException {
+        if (!dialogs.reliabilityEnabled()) {
+            return;
+        }
+        String callId = SipHeaderValues.callId(invite.headers());
+        String localTag = SipHeaderValues.fromTag(invite.headers()).orElseThrow(
+                () -> new SipHeaderValueException("From tag is required for a UAC Dialog Set")
+        );
+        long cseq = SipHeaderValues.cseq(invite.headers()).sequenceNumber();
+        for (DialogHandle dialog : dialogs.findBySet(new DialogSetId(callId, localTag))) {
+            await(dialogs.releaseUacExchange(new DialogInviteKey(dialog.id(), cseq)));
+        }
+    }
+
     private void cleanupDialogSet(DialogSetId setId, DialogTerminationReason reason) {
         dialogs.findBySet(setId).forEach(dialog -> {
             if (dialog.snapshot().state() == DialogState.EARLY) {
@@ -298,8 +322,12 @@ public final class DialogTransactionBridge {
     }
 
     private static void await(CompletionStage<?> stage) {
+        awaitValue(stage);
+    }
+
+    private static <T> T awaitValue(CompletionStage<T> stage) {
         try {
-            stage.toCompletableFuture().join();
+            return stage.toCompletableFuture().join();
         } catch (CompletionException exception) {
             if (exception.getCause() instanceof RuntimeException runtimeException) {
                 throw runtimeException;
@@ -341,7 +369,33 @@ public final class DialogTransactionBridge {
                 TransportContext context
         ) {
             try {
-                processClientResponse(transaction.originalRequest(), response);
+                Optional<DialogHandle> dialog = processClientResponse(
+                        transaction.originalRequest(),
+                        response
+                );
+                if (response.statusCode() >= 200
+                        && response.statusCode() < 300
+                        && dialog.isPresent()
+                        && dialogs.reliabilityEnabled()) {
+                    DialogAckTransmission transmission = awaitValue(dialogs.prepareUacAck(
+                            dialog.orElseThrow().id(),
+                            transaction.originalRequest(),
+                            response
+                    ));
+                    try {
+                        awaitValue(dialogs.sendUacAck(transmission, context.protocol()));
+                    } catch (Throwable cause) {
+                        long cseq = SipHeaderValues.cseq(
+                                transaction.originalRequest().headers()
+                        ).sequenceNumber();
+                        dialogs.reportReliabilityFailure(
+                                new DialogInviteKey(dialog.orElseThrow().id(), cseq),
+                                transmission.ack(),
+                                cause
+                        );
+                        throw cause;
+                    }
+                }
             } catch (Throwable cause) {
                 reportClientFailure("failed to bridge INVITE client response", cause);
             }
@@ -365,6 +419,7 @@ public final class DialogTransactionBridge {
                         transaction.originalRequest(),
                         DialogTerminationReason.INVITE_TRANSACTION_TERMINATED
                 );
+                releaseClientAckCache(transaction.originalRequest());
             } catch (Throwable cause) {
                 reportClientFailure("failed to clean up UAC Early Dialogs", cause);
             }
@@ -385,7 +440,7 @@ public final class DialogTransactionBridge {
                 SipRequest request,
                 TransportContext context
         ) {
-            BridgedServerHandle bridged = new BridgedServerHandle(transaction, request);
+            BridgedServerHandle bridged = new BridgedServerHandle(transaction, request, context);
             BridgedServerHandle existing = serverHandles.putIfAbsent(transaction, bridged);
             serverDelegate.onInvite(existing == null ? bridged : existing, request, context);
         }
@@ -410,7 +465,18 @@ public final class DialogTransactionBridge {
 
         @Override
         public void onUnmatchedAck(SipRequest ack, TransportContext context) {
-            serverDelegate.onUnmatchedAck(ack, context);
+            boolean matched = false;
+            if (dialogs.reliabilityEnabled()) {
+                try {
+                    DialogId id = DialogId.from(ack.headers(), DialogRole.UAS);
+                    matched = awaitValue(dialogs.receiveAck(id, ack, context));
+                } catch (Throwable cause) {
+                    reportServerFailure("failed to route Dialog ACK", cause);
+                }
+            }
+            if (!matched) {
+                serverDelegate.onUnmatchedAck(ack, context);
+            }
         }
 
         @Override
@@ -420,7 +486,11 @@ public final class DialogTransactionBridge {
 
         @Override
         public void onTransportFailure(InviteServerHandle transaction, Throwable cause) {
-            serverDelegate.onTransportFailure(serverHandle(transaction), cause);
+            InviteServerHandle selected = serverHandle(transaction);
+            if (selected instanceof BridgedServerHandle bridged) {
+                bridged.releaseSuccessReliability();
+            }
+            serverDelegate.onTransportFailure(selected, cause);
         }
 
         @Override
@@ -456,12 +526,21 @@ public final class DialogTransactionBridge {
 
         private final InviteServerHandle delegate;
         private final SipRequest invite;
+        private final TransportEndpoint responseTarget;
+        private final TransportReliability reliability;
         private final Set<DialogId> dialogIds = ConcurrentHashMap.newKeySet();
         private final Object responseMonitor = new Object();
 
-        private BridgedServerHandle(InviteServerHandle delegate, SipRequest invite) {
+        private BridgedServerHandle(
+                InviteServerHandle delegate,
+                SipRequest invite,
+                TransportContext context
+        ) {
             this.delegate = Objects.requireNonNull(delegate, "delegate");
             this.invite = Objects.requireNonNull(invite, "invite");
+            Objects.requireNonNull(context, "context");
+            responseTarget = new TransportEndpoint(context.protocol(), context.remoteAddress());
+            reliability = TransportReliability.from(context.protocol());
         }
 
         @Override
@@ -482,8 +561,25 @@ public final class DialogTransactionBridge {
                     processServerResponse(this, response);
                     delegate.sendResponse(response);
                 } catch (Throwable cause) {
+                    if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                        releaseSuccessReliability();
+                    }
                     reportServerFailure("failed to bridge INVITE server response", cause);
                 }
+            }
+        }
+
+        private void releaseSuccessReliability() {
+            if (!dialogs.reliabilityEnabled()) {
+                return;
+            }
+            try {
+                long cseq = SipHeaderValues.cseq(invite.headers()).sequenceNumber();
+                for (DialogId id : dialogIds) {
+                    await(dialogs.releaseUasExchange(new DialogInviteKey(id, cseq)));
+                }
+            } catch (Throwable cause) {
+                reportServerFailure("failed to release UAS 2xx reliability state", cause);
             }
         }
 

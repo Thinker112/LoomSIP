@@ -194,7 +194,7 @@ final class InviteServerTransaction extends AbstractInviteTransaction implements
 
         if (response.statusCode() < 300) {
             state = InviteServerState.ACCEPTED;
-            sendMessage(response, responseTarget);
+            acceptedResponseOperations.add(sendMessage(response, responseTarget));
             timers().start(SipTimer.L, timerConfig.sixtyFourT1());
             return;
         }

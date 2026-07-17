@@ -116,4 +116,31 @@ public record ViaHeaderValue(
             throw new IllegalStateException("rport must be numeric", exception);
         }
     }
+
+    /**
+     * Renders this Via value for a SIP header field.
+     *
+     * @return normalized wire value
+     */
+    public String wireValue() {
+        StringBuilder value = new StringBuilder("SIP/2.0/")
+                .append(transport.value())
+                .append(' ')
+                .append(sentBy);
+        for (SipParameter parameter : parameters) {
+            value.append(';').append(parameter.name());
+            parameter.value().ifPresent(parameterValue -> value.append('=')
+                    .append(renderParameter(parameterValue)));
+        }
+        return value.toString();
+    }
+
+    private static String renderParameter(String value) {
+        try {
+            HeaderSyntax.requireToken(value, "Via parameter value");
+            return value;
+        } catch (IllegalArgumentException ignored) {
+            return '"' + value.replace("\\", "\\\\").replace("\"", "\\\"") + '"';
+        }
+    }
 }

@@ -1,12 +1,21 @@
 package org.loomsip.dialog;
 
 import org.loomsip.message.SipUri;
+import org.loomsip.message.SipMessage;
+import org.loomsip.message.SipRequest;
+import org.loomsip.message.SipResponse;
+import org.loomsip.transaction.TransportReliability;
+import org.loomsip.transport.SendResult;
+import org.loomsip.transport.TransportContext;
+import org.loomsip.transport.TransportEndpoint;
+import org.loomsip.transport.TransportProtocol;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -39,6 +48,7 @@ public final class DialogManager implements AutoCloseable {
     private final DialogConfig config;
     private final DialogLifecycleListener listener;
     private final DialogRepository repository;
+    private final DialogRuntime runtime;
     private final Executor dialogExecutor;
     private final Executor callbackExecutor;
     private final ExecutorService ownedDialogExecutor;
@@ -64,7 +74,31 @@ public final class DialogManager implements AutoCloseable {
                 new InMemoryDialogRepository(config.dialogs()),
                 newVirtualExecutor("loomsip-dialog-"),
                 newVirtualExecutor("loomsip-dialog-tu-"),
-                true
+                true,
+                null
+        );
+    }
+
+    /**
+     * Creates a manager with Dialog reliability services and owned virtual-thread executors.
+     *
+     * @param config Dialog capacities
+     * @param listener ordered lifecycle listener
+     * @param runtime externally owned protocol runtime
+     */
+    public DialogManager(
+            DialogConfig config,
+            DialogLifecycleListener listener,
+            DialogRuntime runtime
+    ) {
+        this(
+                config,
+                listener,
+                new InMemoryDialogRepository(config.dialogs()),
+                newVirtualExecutor("loomsip-dialog-"),
+                newVirtualExecutor("loomsip-dialog-tu-"),
+                true,
+                Objects.requireNonNull(runtime, "runtime")
         );
     }
 
@@ -84,7 +118,36 @@ public final class DialogManager implements AutoCloseable {
             Executor dialogExecutor,
             Executor callbackExecutor
     ) {
-        this(config, listener, repository, dialogExecutor, callbackExecutor, false);
+        this(config, listener, repository, dialogExecutor, callbackExecutor, false, null);
+    }
+
+    /**
+     * Creates a manager with external repository, executors, and protocol runtime.
+     *
+     * @param config Dialog capacities
+     * @param listener ordered lifecycle listener
+     * @param repository externally owned Dialog repository
+     * @param dialogExecutor state executor
+     * @param callbackExecutor TU callback executor
+     * @param runtime externally owned protocol runtime
+     */
+    public DialogManager(
+            DialogConfig config,
+            DialogLifecycleListener listener,
+            DialogRepository repository,
+            Executor dialogExecutor,
+            Executor callbackExecutor,
+            DialogRuntime runtime
+    ) {
+        this(
+                config,
+                listener,
+                repository,
+                dialogExecutor,
+                callbackExecutor,
+                false,
+                Objects.requireNonNull(runtime, "runtime")
+        );
     }
 
     private DialogManager(
@@ -93,11 +156,13 @@ public final class DialogManager implements AutoCloseable {
             DialogRepository repository,
             Executor dialogExecutor,
             Executor callbackExecutor,
-            boolean ownsExecutors
+            boolean ownsExecutors,
+            DialogRuntime runtime
     ) {
         this.config = Objects.requireNonNull(config, "config");
         this.listener = Objects.requireNonNull(listener, "listener");
         this.repository = Objects.requireNonNull(repository, "repository");
+        this.runtime = runtime;
         this.dialogExecutor = Objects.requireNonNull(dialogExecutor, "dialogExecutor");
         this.callbackExecutor = Objects.requireNonNull(callbackExecutor, "callbackExecutor");
         if (repository.capacity() < config.dialogs()) {
@@ -124,7 +189,8 @@ public final class DialogManager implements AutoCloseable {
                     callbackExecutor,
                     config,
                     listener,
-                    this::dialogTerminated
+                    this::dialogTerminated,
+                    runtime
             ));
         }
     }
@@ -209,6 +275,83 @@ public final class DialogManager implements AutoCloseable {
         return requireDialog(id).acceptRemoteSequence(sequenceNumber);
     }
 
+    CompletionStage<DialogAckTransmission> prepareUacAck(
+            DialogId id,
+            SipRequest invite,
+            SipResponse response
+    ) {
+        requireRuntime();
+        return requireDialog(id).prepareUacAck(invite, response);
+    }
+
+    CompletionStage<SendResult> sendUacAck(
+            DialogAckTransmission transmission,
+            TransportProtocol preferredTransport
+    ) {
+        DialogRuntime selected = requireRuntime();
+        return selected.targetResolver()
+                .resolve(transmission.nextHop(), preferredTransport)
+                .thenCompose(target -> selected.send(transmission.ack(), target));
+    }
+
+    CompletionStage<Void> releaseUacExchange(DialogInviteKey key) {
+        if (runtime == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Optional<DialogHandle> selected = find(key.dialogId());
+        return selected.isEmpty()
+                ? CompletableFuture.completedFuture(null)
+                : ((SipDialog) selected.orElseThrow()).releaseUacExchange(key);
+    }
+
+    CompletionStage<Void> registerUasSuccess(
+            DialogId id,
+            SipResponse response,
+            TransportEndpoint responseTarget,
+            TransportReliability reliability
+    ) {
+        requireRuntime();
+        return requireDialog(id).registerUasSuccess(response, responseTarget, reliability);
+    }
+
+    CompletionStage<Boolean> receiveAck(
+            DialogId id,
+            SipRequest ack,
+            TransportContext context
+    ) {
+        if (runtime == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+        Optional<DialogHandle> selected = find(id);
+        return selected.isEmpty()
+                ? CompletableFuture.completedFuture(false)
+                : ((SipDialog) selected.orElseThrow()).receiveAck(ack, context);
+    }
+
+    CompletionStage<Void> releaseUasExchange(DialogInviteKey key) {
+        if (runtime == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Optional<DialogHandle> selected = find(key.dialogId());
+        return selected.isEmpty()
+                ? CompletableFuture.completedFuture(null)
+                : ((SipDialog) selected.orElseThrow()).releaseUasExchange(key);
+    }
+
+    void reportReliabilityFailure(
+            DialogInviteKey key,
+            SipMessage message,
+            Throwable cause
+    ) {
+        find(key.dialogId()).ifPresent(dialog ->
+                ((SipDialog) dialog).reportReliabilityFailure(key, message, cause)
+        );
+    }
+
+    boolean reliabilityEnabled() {
+        return runtime != null;
+    }
+
     /** Terminates active Dialogs and releases executors owned by this manager. */
     @Override
     public void close() {
@@ -271,6 +414,13 @@ public final class DialogManager implements AutoCloseable {
         if (closed.get()) {
             throw new IllegalStateException("Dialog manager is closed");
         }
+    }
+
+    private DialogRuntime requireRuntime() {
+        if (runtime == null) {
+            throw new IllegalStateException("Dialog reliability runtime is not configured");
+        }
+        return runtime;
     }
 
     private void reportManagerFailure(Throwable cause) {

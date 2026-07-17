@@ -6,5 +6,12 @@ sealed interface DialogEvent permits
         DialogRemoteTargetUpdate,
         DialogLocalSequenceRequested,
         DialogRemoteSequenceReceived,
+        DialogUacSuccessReceived,
+        DialogUacExchangeReleased,
+        DialogUasSuccessRegistered,
+        DialogUasExchangeReleased,
+        DialogAckReceived,
+        DialogTimerExpired,
+        DialogReliabilityTransportFailed,
         DialogShutdown {
 }

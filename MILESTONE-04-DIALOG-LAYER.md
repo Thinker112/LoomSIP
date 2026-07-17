@@ -126,11 +126,242 @@ Body 在本阶段继续作为不透明二进制数据传递。
 
 ### 4C：2xx、ACK 与可靠性
 
+实施状态：已完成（2026-07-17）。
+
 - UAC 2xx ACK 自动生成和缓存。
 - 重复 2xx 触发相同 ACK 重发。
 - UAS 2xx ACK 按 Dialog ID 路由。
 - UDP 2xx 重传和 ACK 等待超时。
 - ACK 丢失和 2xx 丢失的虚拟时钟测试。
+
+已实现组件和规则：
+
+- `DialogInviteKey` 使用 `DialogId + INVITE CSeq` 标识一次待确认的 INVITE 成功交换。
+- `DialogAcknowledgements` 根据 Confirmed Dialog、原始 INVITE 和 2xx 构造完整不可变 ACK，并通过 `DialogAckTransmission` 保存 ACK、Next-Hop 和路由计划。
+- `SipDialog` 在自身 Mailbox 内维护 UAC ACK 缓存、UAS 2xx 缓存、已确认 INVITE 历史和 Timer generation；重复 2xx 复用完全相同的 ACK。
+- `DialogTimerManager` 将 `TWO_XX_RETRANSMIT` 和 `TWO_XX_ACK_TIMEOUT` 转换为带 generation 的 Dialog Event；UDP 重传按 `T1 -> 2*T1 -> ... -> T2` 推进。
+- `DialogTransactionBridge` 保证 UAC ACK 先进入发送流程再通知应用 2xx，并在 UAS 初始 2xx 进入 IST 前注册可靠性状态；初始发送失败会释放对应 Timer 和缓存。
+- 未匹配非 2xx IST 的 ACK 由 Bridge 按 UAS Dialog ID 路由到 Dialog Mailbox；匹配成功后取消重传与超时，重复 ACK 被吸收且不重复回调。
+- `DialogRuntime` 提供 Sender、目标解析、Timer 配置和独立 Transport Executor。Dialog 自有的 ACK/2xx 写操作不占用 Dialog Mailbox 调用栈，避免同步 Sender 回送 ACK 时发生重入死锁。
+- ACK 等待超过 `64*T1` 后清理可靠性状态并报告 `onAckTimeout`，但保留 Confirmed Dialog；4C 不擅自发送 BYE。
+
+验证覆盖：
+
+- `DialogAcknowledgementsTest` 覆盖 ACK 字段、loose/strict routing 和新 Via branch。
+- `DialogReliabilityTest` 覆盖 T1/T2 重传、ACK 匹配与去重、错误 CSeq、`64*T1` 超时、可靠 Transport、Manager 关闭、TU 回调隔离，以及同步 Sender 重入。
+- `DialogReliabilityUdpFlowTest` 以虚拟时钟和异步投递网络覆盖首个 2xx 丢失、首个 ACK 丢失、forked 2xx、ACK 发送失败和初始 UAS 2xx 发送失败。
+
+#### 4C.1 责任边界
+
+4C 将 INVITE 2xx 的可靠性责任放在 Dialog Layer：
+
+- ICT 继续负责 INVITE 请求、1xx/非 2xx/2xx 接收以及 Timer A、B、D、M。
+- IST 继续负责 INVITE 请求、非 2xx ACK、非 2xx 重传以及 Timer G、H、I、L。
+- 2xx ACK 不属于原 INVITE Transaction，由 Dialog 创建、缓存和发送。
+- UAS INVITE 2xx 的 UDP 重传不属于 IST，由 Dialog Timer 驱动。
+- `DialogTransactionBridge` 只转换有序事件，ACK/2xx 缓存和 Timer 状态必须由 Dialog Mailbox 保护，不能保存在 Bridge 的普通并发 Map 中。
+
+```mermaid
+flowchart LR
+    ICT[ICT State Machine] -->|ordered 2xx callback| BRIDGE[DialogTransactionBridge]
+    BRIDGE -->|Dialog event| MAILBOX[Dialog Mailbox]
+    MAILBOX --> ACK[ACK cache]
+    MAILBOX --> RESP[UAS 2xx cache]
+    MAILBOX --> TIMER[Dialog Timer state]
+    ACK -->|send / resend| IO[Dialog Transport Executor]
+    RESP -->|UDP retransmit| IO
+    IO --> TRANSPORT[Transport]
+    SCHEDULER[SipScheduler] -.->|timer event only| MAILBOX
+```
+
+#### 4C.2 数据模型与组件
+
+已实现：
+
+```text
+DialogInviteKey
+  DialogId
+  INVITE CSeq
+
+DialogAcknowledgements
+DialogAckTransmission
+DialogTimer
+DialogTimerKey
+DialogTimerExpired
+DialogTimerManager
+DialogRuntime
+DialogUacSuccessReceived / DialogUasSuccessRegistered
+DialogAckReceived / Dialog reliability callbacks
+```
+
+约束：
+
+- 待确认交换以 `DialogId + INVITE CSeq` 标识，不能只在 Dialog 上保存一个 `lastAck` 或 `lastResponse`。
+- Forked 2xx 使用不同 Dialog ID，各自维护 ACK。
+- 后续 re-INVITE 可以复用同一模型，以不同 INVITE CSeq 区分。
+- ACK 和 2xx 都缓存为完整不可变消息。
+- Timer 使用 generation，已取消或已替换的旧回调必须被忽略。
+- `InviteAcknowledgements` 继续只负责非 2xx ACK；2xx ACK 使用独立的 `DialogAcknowledgements`。
+
+#### 4C.3 UAC 2xx ACK
+
+首次收到一个 Dialog/CSeq 的 2xx：
+
+```mermaid
+sequenceDiagram
+    participant ICT
+    participant Bridge as DialogTransactionBridge
+    participant Dialog as Dialog Mailbox
+    participant Resolver as DialogTargetResolver
+    participant IO as Dialog Transport Executor
+    participant Transport
+    participant TU as Application / TU
+
+    ICT->>Bridge: onResponse(2xx)
+    Bridge->>Dialog: DialogUacSuccessReceived
+    Dialog->>Dialog: confirm Dialog and build ACK
+    Dialog->>Dialog: cache immutable ACK
+    Dialog-->>Bridge: DialogAckTransmission
+    Bridge->>Resolver: resolve route-plan Next-Hop
+    Resolver-->>Bridge: TransportEndpoint
+    Bridge->>IO: dispatch ACK write
+    IO->>Transport: send ACK
+    Transport-->>Bridge: send completion
+    Bridge->>TU: deliver 2xx callback
+```
+
+2xx ACK 字段：
+
+- Request-URI 使用当前 Remote Target。
+- Route 使用 Dialog Route Set 和 strict/loose routing 结果。
+- From、To 和 Call-ID 使用对应 INVITE/2xx。
+- CSeq 数字等于原 INVITE，Method 为 ACK。
+- Via 使用新的 branch。
+- ACK 不创建 Transaction。
+
+重复 2xx：
+
+```text
+duplicate 2xx
+    -> lookup DialogInviteKey
+    -> obtain cached immutable ACK
+    -> resend the same ACK
+```
+
+重复发送时不能重新生成 Via branch。应用是否收到重复 2xx 保持现有 ICT 行为，但 ACK 必须先进入发送流程。
+
+#### 4C.4 UAS 2xx 重传
+
+UAS 发送 Dialog-forming 2xx 时必须遵循：
+
+```text
+confirm Dialog
+    -> cache 2xx and response target
+    -> register ACK waiting state
+    -> start Dialog retransmit and timeout timers
+    -> submit initial 2xx to IST / Transport
+    -> release reliability state if initial send fails
+```
+
+UDP 重传间隔：
+
+```text
+T1 -> 2*T1 -> 4*T1 -> ... -> T2 -> T2
+```
+
+规则：
+
+- 重传持续到匹配 ACK 到达或总时长达到 `64*T1`。
+- 每次 Timer 只向 Dialog Mailbox 投递事件，不直接发送或修改缓存。
+- Dialog Mailbox 决定重传后，将实际 Sender 调用提交给独立 Transport Executor；Sender 不能重入当前 drain task。
+- ACK 和重传 Timer 同时到达时，以 Dialog Mailbox 接受顺序决定是否允许最后一次重传。
+- 可靠 Transport 不执行 SIP 消息级 2xx 重传，但保留 ACK 等待、失败通知和清理边界。
+- IST Timer L 继续负责 IST 生命周期；Dialog Timer 负责 2xx/ACK 可靠性，两者不能混用。
+
+#### 4C.5 入站 2xx ACK 路由
+
+```mermaid
+flowchart TD
+    ACK[Inbound ACK] --> ITM[InviteTransactionManager]
+    ITM --> MATCH{matched non-2xx IST?}
+    MATCH -->|yes| IST[IST Mailbox]
+    MATCH -->|no| BRIDGE[DialogTransactionBridge]
+    BRIDGE --> ID[derive UAS DialogId and INVITE CSeq]
+    ID --> FOUND{matching Dialog exchange?}
+    FOUND -->|yes| MAILBOX[Dialog Mailbox]
+    MAILBOX --> CANCEL[cancel retransmit and timeout]
+    MAILBOX --> CLEAN[remove cached 2xx state]
+    MAILBOX --> CALLBACK[notify Dialog ACK listener]
+    FOUND -->|no| UNMATCHED[unmatched ACK callback / routing error]
+```
+
+匹配规则：
+
+- UAS Dialog ID 使用 `Call-ID + To tag(local) + From tag(remote)`。
+- ACK CSeq 数字必须匹配待确认 INVITE CSeq，Method 必须为 ACK。
+- 重复 ACK 不重复推进状态或回调。
+- Dialog 已终止或不存在时不能取消其他 Dialog/CSeq 的 Timer。
+
+#### 4C.6 ACK 超时策略
+
+`64*T1` 内未收到 ACK 时，4C 初版执行：
+
+```text
+stop retransmission
+    -> cancel Dialog timers
+    -> clear cached 2xx reliability state
+    -> emit ACK_TIMEOUT callback
+    -> keep Confirmed Dialog
+```
+
+4C 不自动发送 BYE，因为 Dialog 内 BYE 属于 4D。4D 具备 Dialog 内请求能力后，再由应用或策略决定 ACK 超时是否触发 BYE。
+
+#### 4C.7 失败和关闭
+
+必须覆盖：
+
+- ACK 构造失败。
+- Route Planner 或 Target Resolver 失败。
+- ACK 首次发送或重发失败。
+- UAS 2xx 重传发送失败。
+- Dialog Mailbox、Scheduler 或 Executor 拒绝任务。
+- ACK、Timer、Dialog 终止并发到达。
+- Stack 关闭时仍有待 ACK 的 UAS 2xx。
+- 清理后不能留下 Timer、缓存消息或未完成异步结果。
+
+失败通过 Dialog 级回调报告，不能错误复用 ICT/IST 的 Transaction transport-failure 语义。
+
+#### 4C.8 测试清单
+
+所有 Timer 测试使用虚拟时钟，不使用 `Thread.sleep()`：
+
+- 首个 2xx 生成并发送 ACK。
+- 重复 2xx 重发完全相同的缓存 ACK。
+- 第一个 2xx 丢失，UAS 重传后完成 ACK。
+- 第一个 ACK 丢失，重复 2xx 触发缓存 ACK 重发。
+- Forked 2xx 分别创建和缓存 ACK。
+- ACK 到达后停止 UAS 2xx 重传和 ACK Timeout。
+- ACK 与重传 Timer 的竞态。
+- 错误 Dialog ID 或 CSeq 的 ACK 不取消 Timer。
+- 重复 ACK 不重复通知。
+- `64*T1` ACK 超时并清理可靠性状态。
+- 可靠 Transport 不执行消息级 2xx 重传。
+- Manager 关闭时取消全部 Dialog Timer。
+- TU 回调阻塞不影响 ACK、重传和 Timer 处理。
+- 同步 Sender 立即把 ACK 路由回本栈时不发生 Dialog Mailbox 重入死锁。
+
+#### 4C.9 实施顺序
+
+```text
+4C-1  ACK / Timer 数据模型和 Dialog Event
+  -> 4C-2  UAC ACK 生成、缓存和发送
+  -> 4C-3  UAS 2xx 缓存和 UDP Timer
+  -> 4C-4  入站 ACK Dialog 路由
+  -> 4C-5  丢包、竞态、关闭测试
+  -> 4C-6  文档状态和组件图更新
+```
+
+4C 不实现 re-INVITE、BYE 或通用 Dialog 内请求构造，这些职责保留到 4D。
 
 ### 4D：Dialog 内请求与基本呼叫
 
@@ -347,8 +578,12 @@ flowchart LR
         R[DialogRepository<br/>ID / fork index]
         S[SipDialog<br/>Dialog Mailbox]
         SNAP[DialogSnapshot]
+        CACHE[ACK / UAS 2xx cache]
+        DT[DialogTimerManager]
         RP[DialogRoutePlanner]
         TR[DialogTargetResolver]
+        RT[DialogRuntime]
+        IO[Dialog Transport Executor]
     end
 
     CB[TU Callback Dispatcher]
@@ -362,17 +597,26 @@ flowchart LR
     M --> R
     R --> S
     S --> SNAP
+    S --> CACHE
+    S --> DT
     S --> CB
     CB -->|ordered callback| A
     A -->|application command| M
 
     S --> RP
-    RP -->|Next-Hop URI| TR
-    TR -->|TransportEndpoint| TM
-    TM -->|outbound SIP request / response| N
+    RP -->|Next-Hop URI| RT
+    CACHE -->|ACK / retransmitted 2xx| RT
+    RT --> TR
+    TR -->|TransportEndpoint| IO
+    RT -->|known response target| IO
+    IO -->|Dialog-owned transport write| N
+    S -.->|4D create transaction| TM
+    TM -->|transaction-owned request / response| N
 
     SCH -.->|timer event| X
-    SCH -.->|timer event| S
+    DT -.->|schedule / cancel| SCH
+    SCH -.->|timer callback| DT
+    DT -.->|generation-checked event| S
     CLOSE -.->|stop I/O| N
     CLOSE -.->|shutdown Dialogs| M
     CLOSE -.->|shutdown Transactions| X
@@ -386,6 +630,7 @@ flowchart LR
 - `DialogRoutePlanner` 只计算 SIP 路由，`DialogTargetResolver` 只负责 Next-Hop 到网络端点的解析。
 - Dialog 内请求需要创建新的 Transaction；因此请求方向是 `Dialog Mailbox -> Route/Resolver -> Transaction Manager -> Transport`。
 - Timer 只投递事件，Scheduler 不直接修改 Transaction 或 Dialog 状态。
+- 2xx ACK 和 UAS 2xx 重传属于 Dialog，不创建 Transaction；`DialogRuntime` 通过独立 Transport Executor 发送，避免 Sender 同步回调重入 Dialog Mailbox。
 - 应用回调从独立 TU Dispatcher 发出，应用阻塞不能占用 Dialog Mailbox 的 drain task。
 
 Dialog 不替代 Transaction。一个 Dialog 内可以连续产生多个独立 Transaction：
