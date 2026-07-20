@@ -169,6 +169,30 @@ public final class SipDialog implements DialogHandle {
                 ).thenApply(ignored -> transaction));
     }
 
+    @Override
+    public CompletionStage<ClientTransactionHandle> sendRequest(
+            SipMethod method,
+            SipHeaders additionalHeaders,
+            SipBody body
+    ) {
+        Objects.requireNonNull(method, "method");
+        Objects.requireNonNull(additionalHeaders, "additionalHeaders");
+        Objects.requireNonNull(body, "body");
+        DialogRequestRuntime selected = requestRuntime;
+        if (selected == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "Dialog request runtime is not configured"
+            ));
+        }
+        try {
+            DialogMethodPolicy.requireGenericOutbound(method);
+        } catch (RuntimeException exception) {
+            return CompletableFuture.failedFuture(exception);
+        }
+        return prepareRequest(method, additionalHeaders, body)
+                .thenCompose(selected::sendNonInvite);
+    }
+
     CompletionStage<Void> transitionTo(DialogState target, DialogTerminationReason reason) {
         CompletableFuture<Void> result = new CompletableFuture<>();
         submit(new DialogStateTransition(target, reason, result), result);
@@ -558,12 +582,6 @@ public final class SipDialog implements DialogHandle {
             ));
             return;
         }
-        if (snapshot.state() != DialogState.CONFIRMED) {
-            event.result().completeExceptionally(new IllegalStateException(
-                    "in-Dialog requests require a confirmed Dialog"
-            ));
-            return;
-        }
         if (snapshot.localCSeq() == CSeqHeaderValue.MAX_SEQUENCE_NUMBER) {
             event.result().completeExceptionally(new IllegalStateException("Local CSeq is exhausted"));
             return;
@@ -588,23 +606,9 @@ public final class SipDialog implements DialogHandle {
     }
 
     private void handleInDialogRequest(DialogInDialogRequestReceived event) {
-        if (snapshot.state() != DialogState.CONFIRMED) {
-            event.result().completeExceptionally(new DialogRequestRejectedException(
-                    481,
-                    "Call/Transaction Does Not Exist",
-                    "in-Dialog request requires a confirmed active Dialog"
-            ));
-            return;
-        }
         try {
             SipRequest request = event.request();
-            if (!SipMethod.INVITE.equals(request.method()) && !SipMethod.BYE.equals(request.method())) {
-                throw new DialogRequestRejectedException(
-                        405,
-                        "Method Not Allowed",
-                        "4D supports only inbound re-INVITE and BYE"
-                );
-            }
+            DialogMethodPolicy.requireInbound(request.method(), snapshot.state());
             if (!id().equals(DialogId.from(request.headers(), DialogRole.UAS))) {
                 throw new DialogRequestRejectedException(
                         481,
@@ -621,7 +625,7 @@ public final class SipDialog implements DialogHandle {
                 );
             }
             Optional<org.loomsip.message.SipUri> remoteTarget = snapshot.remoteTarget();
-            if (SipMethod.INVITE.equals(request.method())) {
+            if (DialogMethodPolicy.refreshesTarget(request.method())) {
                 java.util.List<org.loomsip.message.header.ContactHeaderValue> contacts =
                         org.loomsip.message.header.DialogHeaderValues.contacts(request.headers());
                 if (contacts.size() != 1 || contacts.getFirst().isWildcard()) {
@@ -634,7 +638,7 @@ public final class SipDialog implements DialogHandle {
                 remoteTarget = Optional.of(contacts.getFirst().address().orElseThrow().uri());
             }
             updateSnapshot(snapshot.state(), snapshot.localCSeq(), cseq.sequenceNumber(), remoteTarget);
-            if (SipMethod.BYE.equals(request.method())) {
+            if (DialogMethodPolicy.terminatesDialog(request.method())) {
                 terminate(DialogTerminationReason.REMOTE_BYE);
             }
             event.result().complete(null);

@@ -18,10 +18,22 @@ public record SipMethod(String value) {
     public static final SipMethod CANCEL = new SipMethod("CANCEL");
     /** Standard {@code INVITE} method. */
     public static final SipMethod INVITE = new SipMethod("INVITE");
+    /** Standard {@code INFO} extension method. */
+    public static final SipMethod INFO = new SipMethod("INFO");
+    /** Standard {@code NOTIFY} extension method. */
+    public static final SipMethod NOTIFY = new SipMethod("NOTIFY");
     /** Standard {@code OPTIONS} method. */
     public static final SipMethod OPTIONS = new SipMethod("OPTIONS");
+    /** Standard {@code PRACK} extension method. */
+    public static final SipMethod PRACK = new SipMethod("PRACK");
     /** Standard {@code REGISTER} method. */
     public static final SipMethod REGISTER = new SipMethod("REGISTER");
+    /** Standard {@code REFER} extension method. */
+    public static final SipMethod REFER = new SipMethod("REFER");
+    /** Standard {@code SUBSCRIBE} extension method. */
+    public static final SipMethod SUBSCRIBE = new SipMethod("SUBSCRIBE");
+    /** Standard {@code UPDATE} extension method. */
+    public static final SipMethod UPDATE = new SipMethod("UPDATE");
 
     /**
      * Validates and creates a method value.
@@ -47,9 +59,15 @@ public record SipMethod(String value) {
             case "ACK" -> ACK;
             case "BYE" -> BYE;
             case "CANCEL" -> CANCEL;
+            case "INFO" -> INFO;
             case "INVITE" -> INVITE;
+            case "NOTIFY" -> NOTIFY;
             case "OPTIONS" -> OPTIONS;
+            case "PRACK" -> PRACK;
             case "REGISTER" -> REGISTER;
+            case "REFER" -> REFER;
+            case "SUBSCRIBE" -> SUBSCRIBE;
+            case "UPDATE" -> UPDATE;
             default -> new SipMethod(value);
         };
     }

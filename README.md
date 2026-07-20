@@ -27,6 +27,7 @@ LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协
 | Dialog Layer | 已实现 | Early/Confirmed Dialog、fork、Route Set、Remote Target、CSeq 和 2xx ACK |
 | 基本呼叫 | 已实现 | INVITE、ACK、re-INVITE、BYE、CANCEL 及真实 UDP 完整流程 |
 | TCP/TLS Transport | 已实现（5A～5F 已完成） | TCP/TLS 流式分帧、Client/Server、TLS 握手、连接复用、统一协议选择、连接级写限制和真实完整呼叫验收已完成 |
+| 认证与扩展基础 | 已实现（6A） | 逻辑请求 Exchange、Attempt 上限、结构化请求重建和通用 Dialog 内 Non-INVITE 请求 |
 | Digest Authentication | 后续规划 | 独立认证阶段，不与 Transport 生命周期混合 |
 | Stack API | 后续规划 | 统一组件装配、配置和关闭顺序 |
 
@@ -136,6 +137,7 @@ org.loomsip
   transport     UDP Transport、Endpoint、网络上下文和生命周期
   transaction   ICT、IST、NICT、NIST、Timer、Dispatcher 和 Repository
   dialog        Dialog、Route Set、CSeq、ACK、re-INVITE 和 BYE
+  exchange      跨多个 Transaction Attempt 的逻辑请求和重试边界
   concurrent    Mailbox 和顺序回调派发
 ```
 
@@ -158,7 +160,7 @@ org.loomsip
 2. **事务层（已完成）**：Transaction ID、Mailbox、Dispatcher、四类状态机、Timer、ACK/CANCEL 关联规则。
 3. **Dialog 与基本呼叫（已完成）**：Early/Confirmed Dialog，以及 INVITE、ACK、re-INVITE、BYE、CANCEL 完整流程。
 4. **可靠传输（已完成，5A～5F）**：TCP/TLS 分帧、连接复用、TLS 握手、统一协议选择、失败传播、连接级资源限制和真实完整呼叫验收。
-5. **认证与 SIP 扩展**：Digest、PRACK/100rel、UPDATE、Session Timer、REFER 和 INFO。
+5. **认证与 SIP 扩展（6A 已完成，6B～6G 待执行）**：请求尝试基础、Digest、PRACK/100rel、UPDATE、Session Timer 和 INFO；完整 REFER 与事件框架后置。
 6. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
 
 ## 文档
@@ -169,6 +171,7 @@ org.loomsip
 - [MILESTONE-03-TRANSACTION-LAYER.md](MILESTONE-03-TRANSACTION-LAYER.md)：Transaction、Timer、ACK 和 CANCEL 的详细设计。
 - [MILESTONE-04-DIALOG-LAYER.md](MILESTONE-04-DIALOG-LAYER.md)：Dialog、2xx ACK、re-INVITE、BYE 和基本呼叫设计。
 - [MILESTONE-05-RELIABLE-TRANSPORT.md](MILESTONE-05-RELIABLE-TRANSPORT.md)：TCP/TLS 分帧、连接复用、安全和资源限制方案。
+- [MILESTONE-06-AUTHENTICATION-EXTENSIONS.md](MILESTONE-06-AUTHENTICATION-EXTENSIONS.md)：Digest、请求重试、PRACK/100rel、UPDATE、Session Timer 和 INFO 方案。
 - [CONTRIBUTING.md](CONTRIBUTING.md)：开发约定与公共 API Javadoc 要求。
 
 ## 贡献约定

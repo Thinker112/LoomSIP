@@ -136,6 +136,57 @@ public final class SipHeaders {
     }
 
     /**
+     * Returns a copy without fields equivalent to the supplied name.
+     *
+     * <p>Standard and compact names are treated as equivalent, so removing
+     * {@code Via} also removes fields written as {@code v}.</p>
+     *
+     * @param name standard or compact header name to remove
+     * @return this instance when no field matched, otherwise a filtered copy
+     * @throws NullPointerException if {@code name} is {@code null}
+     */
+    public SipHeaders without(String name) {
+        Objects.requireNonNull(name, "name");
+        List<SipHeader> filtered = entries.stream()
+                .filter(header -> !namesEqual(header.name(), name))
+                .toList();
+        return filtered.size() == entries.size() ? this : SipHeaders.of(filtered);
+    }
+
+    /**
+     * Returns a copy containing exactly one field with the supplied name.
+     *
+     * <p>The replacement occupies the position of the first equivalent field;
+     * additional duplicates are removed. If no equivalent field exists, the
+     * replacement is appended.</p>
+     *
+     * @param name header name to replace
+     * @param value replacement unfolded value
+     * @return immutable replaced copy
+     * @throws NullPointerException if an argument is {@code null}
+     * @throws IllegalArgumentException if the replacement is syntactically invalid
+     */
+    public SipHeaders withReplaced(String name, String value) {
+        SipHeader replacement = new SipHeader(name, value);
+        List<SipHeader> replaced = new ArrayList<>(entries.size() + 1);
+        boolean inserted = false;
+        for (SipHeader header : entries) {
+            if (namesEqual(header.name(), name)) {
+                if (!inserted) {
+                    replaced.add(replacement);
+                    inserted = true;
+                }
+            } else {
+                replaced.add(header);
+            }
+        }
+        if (!inserted) {
+            replaced.add(replacement);
+        }
+        return SipHeaders.of(replaced);
+    }
+
+    /**
      * Compares two field names using SIP case and compact-name rules.
      *
      * @param first first field name
@@ -215,6 +266,35 @@ public final class SipHeaders {
          */
         public Builder addAll(List<SipHeader> headers) {
             Objects.requireNonNull(headers, "headers").forEach(this::add);
+            return this;
+        }
+
+        /**
+         * Removes all fields equivalent to the supplied standard or compact name.
+         *
+         * @param name header name to remove
+         * @return this builder
+         * @throws NullPointerException if {@code name} is {@code null}
+         */
+        public Builder remove(String name) {
+            Objects.requireNonNull(name, "name");
+            entries.removeIf(header -> namesEqual(header.name(), name));
+            return this;
+        }
+
+        /**
+         * Replaces all equivalent fields with one field at the first match position.
+         *
+         * @param name header name to replace
+         * @param value replacement unfolded value
+         * @return this builder
+         * @throws NullPointerException if an argument is {@code null}
+         * @throws IllegalArgumentException if the replacement is syntactically invalid
+         */
+        public Builder replace(String name, String value) {
+            SipHeaders replaced = SipHeaders.of(entries).withReplaced(name, value);
+            entries.clear();
+            entries.addAll(replaced.entries());
             return this;
         }
 

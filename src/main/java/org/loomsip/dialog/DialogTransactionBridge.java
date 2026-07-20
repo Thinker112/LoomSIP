@@ -690,15 +690,15 @@ public final class DialogTransactionBridge {
                 SipRequest request,
                 TransportContext context
         ) {
-            if (SipMethod.BYE.equals(request.method())) {
-                try {
+            try {
+                if (SipHeaderValues.toTag(request.headers()).isPresent()) {
                     DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
                     await(dialogs.receiveInDialogRequest(id, request));
-                } catch (Throwable cause) {
-                    rejectInDialogRequest(transaction, request, cause);
-                    reportServerFailure("failed to route in-Dialog BYE", cause);
-                    return;
                 }
+            } catch (Throwable cause) {
+                rejectInDialogRequest(transaction, request, cause);
+                reportServerFailure("failed to route in-Dialog Non-INVITE request", cause);
+                return;
             }
             nonInviteServerDelegate.onRequest(transaction, request, context);
         }

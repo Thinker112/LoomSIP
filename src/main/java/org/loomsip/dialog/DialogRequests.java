@@ -53,14 +53,9 @@ final class DialogRequests {
         Objects.requireNonNull(additionalHeaders, "additionalHeaders");
         Objects.requireNonNull(body, "body");
         Objects.requireNonNull(branch, "branch");
-        if (dialog.state() != DialogState.CONFIRMED) {
-            throw new IllegalArgumentException("in-Dialog request requires a confirmed Dialog");
-        }
+        DialogMethodPolicy.requirePreparedRequest(method, dialog.state());
         if (dialog.secure() && profile.preferredTransport() != org.loomsip.transport.TransportProtocol.TLS) {
             throw new IllegalArgumentException("secure Dialog requests require TLS transport");
-        }
-        if (!SipMethod.INVITE.equals(method) && !SipMethod.BYE.equals(method)) {
-            throw new IllegalArgumentException("4D supports only re-INVITE and BYE");
         }
         rejectManagedHeaders(additionalHeaders);
 

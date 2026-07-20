@@ -18,6 +18,8 @@ import org.loomsip.transaction.invite.InviteServerListener;
 import org.loomsip.transaction.invite.InviteServerState;
 import org.loomsip.transaction.noninvite.ClientTransactionHandle;
 import org.loomsip.transaction.noninvite.NonInviteClientState;
+import org.loomsip.transaction.noninvite.NonInviteServerState;
+import org.loomsip.transaction.noninvite.ServerTransactionHandle;
 import org.loomsip.transaction.timer.SipTimerConfig;
 import org.loomsip.transaction.timer.VirtualSipScheduler;
 import org.loomsip.transport.SendResult;
@@ -152,6 +154,111 @@ class DialogInDialogRequestTest {
 
             assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
             assertTrue(remoteRig.manager.find(dialog.id()).isEmpty());
+        }
+    }
+
+    @Test
+    void genericInfoUsesDialogRoutingAndMonotonicSequence() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            SipBody body = SipBody.of("Signal=5".getBytes(StandardCharsets.US_ASCII));
+
+            ClientTransactionHandle transaction = await(dialog.sendRequest(
+                    SipMethod.INFO,
+                    SipHeaders.builder()
+                            .add("Content-Type", "application/dtmf-relay")
+                            .build(),
+                    body
+            ));
+
+            assertEquals(NonInviteClientState.TRYING, transaction.state());
+            SipRequest request = rig.dispatcher.nonInvites.getFirst();
+            assertEquals(SipMethod.INFO, request.method());
+            assertEquals(11, SipHeaderValues.cseq(request.headers()).sequenceNumber());
+            assertEquals("application/dtmf-relay", request.headers()
+                    .firstValue("Content-Type").orElseThrow());
+            assertEquals(body, request.body());
+            assertEquals(rig.remote, rig.dispatcher.targets.getFirst());
+            assertEquals(11, dialog.snapshot().localCSeq());
+        }
+    }
+
+    @Test
+    void genericApiRejectsMethodsWithDedicatedSemantics() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+
+            for (SipMethod method : List.of(
+                    SipMethod.INVITE,
+                    SipMethod.BYE,
+                    SipMethod.ACK,
+                    SipMethod.CANCEL
+            )) {
+                IllegalArgumentException failure = assertThrows(
+                        IllegalArgumentException.class,
+                        () -> await(dialog.sendRequest(method, SipHeaders.empty(), SipBody.empty()))
+                );
+                assertTrue(failure.getMessage().contains("dedicated"));
+            }
+            assertTrue(rig.dispatcher.nonInvites.isEmpty());
+            assertEquals(10, dialog.snapshot().localCSeq());
+        }
+    }
+
+    @Test
+    void bridgeValidatesGenericInDialogRequestBeforeApplicationCallback() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            AtomicInteger callbacks = new AtomicInteger();
+            AtomicReference<org.loomsip.message.SipResponse> rejection = new AtomicReference<>();
+            DialogTransactionBridge bridge = new DialogTransactionBridge(
+                    rig.manager,
+                    (transaction, response, context) -> {
+                    },
+                    (transaction, request, context) -> {
+                    },
+                    (transaction, response, context) -> {
+                    },
+                    (transaction, request, context) -> {
+                        callbacks.incrementAndGet();
+                        assertEquals(21, dialog.snapshot().remoteCSeq());
+                    }
+            );
+            ServerTransactionHandle serverTransaction = new ServerTransactionHandle() {
+                @Override
+                public TransactionKey key() {
+                    return null;
+                }
+
+                @Override
+                public NonInviteServerState state() {
+                    return NonInviteServerState.TRYING;
+                }
+
+                @Override
+                public void sendResponse(org.loomsip.message.SipResponse response) {
+                    rejection.set(response);
+                }
+
+                @Override
+                public CompletionStage<Void> terminated() {
+                    return CompletableFuture.completedFuture(null);
+                }
+            };
+
+            bridge.nonInviteServerListener().onRequest(
+                    serverTransaction,
+                    inbound(SipMethod.INFO, 21, false),
+                    new TransportContext(
+                            TransportProtocol.UDP,
+                            rig.remote.address(),
+                            rig.remote.address()
+                    )
+            );
+
+            assertEquals(1, callbacks.get());
+            assertEquals(21, dialog.snapshot().remoteCSeq());
+            assertEquals(null, rejection.get());
         }
     }
 
