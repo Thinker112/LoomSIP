@@ -13,7 +13,7 @@
 
 第五阶段在不改变 Transaction/Dialog 串行模型的前提下，引入 TCP/TLS 流式分帧、连接复用、连接失败传播和资源限制。
 
-实施状态：5A～5C 已完成（2026-07-20），5D～5F 待执行。
+实施状态：5A～5D 已完成（2026-07-20），5E～5F 待执行。
 
 ## 2. 阶段目标
 
@@ -446,6 +446,8 @@ SIP handler pipeline
 
 ## 8. 5D：Transport 选择与 Transaction 集成
 
+实施状态：已完成（2026-07-20）。
+
 ### 8.1 统一发送入口
 
 当前 Transaction 依赖 `TransactionMessageSender`。第五阶段建议在其后增加 Transport Selector：
@@ -518,6 +520,24 @@ ConnectionManager
 - 连接关闭同时影响多个 Transaction。
 - Dialog ACK、re-INVITE 和 BYE 通过 TCP/TLS 正确发送。
 - 连接事件和 Timer 同时到达时状态机只终止一次。
+
+已实现组件：
+
+- `TransportRegistry`：注册、启动、查找和关闭 UDP/TCP/TLS Transport，并在发送前拒绝未启动或已关闭的 Registry。
+- `TransportSelector`：只根据已解析 `TransportEndpoint.protocol` 选择具体 Transport，不引入 DNS 或 URI 路由逻辑。
+- `ConnectionAwareMessageSender`：适配现有 `TransactionMessageSender`，保留发送 Future，同时通过 `TransportFailureEvent` 报告失败目标和协议。
+- `TransportFailureListener`：要求监听器将失败转换为 Transaction/Dialog Mailbox 事件，不在 Netty EventLoop 直接修改状态机。
+
+实现边界：
+
+- `AbstractTransaction.sendMessage()` 仍是 Transaction 的权威结果桥接，会把发送 Future 完成重新投递为 `TransportSucceeded`/`TransportFailed`。
+- Registry 只拥有已注册 Transport 的生命周期，不负责 Transaction、Dialog、Timer 或 DNS 路由。
+- 连接关闭造成的待写 Future 失败会沿同一 Selector/MessageSender 路径进入对应 Transaction Mailbox。
+- 多个 Transaction 对同一连接的失败分别通过各自发送 Future 进入各自 Mailbox；连接级广播和写队列背压留到 5E。
+
+已验证测试：
+
+- `TransportRegistryTest`：3 个 Registry 生命周期、UDP/TCP/TLS 路由、重复注册、缺失 Transport 和失败事件场景。
 
 ## 9. 5E：资源限制和生命周期
 
