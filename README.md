@@ -26,7 +26,7 @@ LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协
 | Transaction Layer | 已实现 | ICT、IST、NICT、NIST、虚拟 Timer、ACK/CANCEL 和 RFC 6026 Accepted |
 | Dialog Layer | 已实现 | Early/Confirmed Dialog、fork、Route Set、Remote Target、CSeq 和 2xx ACK |
 | 基本呼叫 | 已实现 | INVITE、ACK、re-INVITE、BYE、CANCEL 及真实 UDP 完整流程 |
-| TCP/TLS Transport | 实施中（5A、5B 已完成） | TCP 流式分帧、Client/Server 和连接复用已完成；TLS、事务失败传播和完整资源限制待 5C～5E |
+| TCP/TLS Transport | 实施中（5A～5C 已完成） | TCP/TLS 流式分帧、Client/Server、TLS 握手和连接复用已完成；事务失败传播和完整资源限制待 5D～5E |
 | Digest Authentication | 后续规划 | 独立认证阶段，不与 Transport 生命周期混合 |
 | Stack API | 后续规划 | 统一组件装配、配置和关闭顺序 |
 
@@ -157,7 +157,7 @@ org.loomsip
 1. **协议基础（已完成）**：消息模型、Parser、Encoder 和 UDP Transport。
 2. **事务层（已完成）**：Transaction ID、Mailbox、Dispatcher、四类状态机、Timer、ACK/CANCEL 关联规则。
 3. **Dialog 与基本呼叫（已完成）**：Early/Confirmed Dialog，以及 INVITE、ACK、re-INVITE、BYE、CANCEL 完整流程。
-4. **可靠传输（实施中，5A、5B 已完成）**：TCP/TLS 分帧、连接复用、失败传播和资源限制。
+4. **可靠传输（实施中，5A～5C 已完成）**：TCP/TLS 分帧、连接复用、TLS 握手、失败传播和资源限制。
 5. **认证与 SIP 扩展**：Digest、PRACK/100rel、UPDATE、Session Timer、REFER 和 INFO。
 6. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
 

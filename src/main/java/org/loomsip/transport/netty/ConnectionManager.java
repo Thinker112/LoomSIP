@@ -62,7 +62,7 @@ public final class ConnectionManager implements AutoCloseable {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(connector, "connector");
 
-        Optional<NettyTransportConnection> reusable = reusableConnection(key.remoteAddress());
+        Optional<NettyTransportConnection> reusable = reusableConnection(key);
         if (reusable.isPresent()) {
             return CompletableFuture.completedFuture(reusable.orElseThrow());
         }
@@ -76,7 +76,7 @@ public final class ConnectionManager implements AutoCloseable {
         // A connect may have completed between the first reuse lookup and this
         // thread winning the pending-connect slot. Recheck before reserving or
         // starting a second physical connection.
-        reusable = reusableConnection(key.remoteAddress());
+        reusable = reusableConnection(key);
         if (reusable.isPresent()) {
             connecting.remove(key, promise);
             promise.complete(reusable.orElseThrow());
@@ -103,11 +103,15 @@ public final class ConnectionManager implements AutoCloseable {
         return promise;
     }
 
-    Optional<NettyTransportConnection> reusableConnection(InetSocketAddress remoteAddress) {
-        Objects.requireNonNull(remoteAddress, "remoteAddress");
+    Optional<NettyTransportConnection> reusableConnection(ConnectionKey key) {
+        Objects.requireNonNull(key, "key");
         return activeById.values().stream()
                 .filter(NettyTransportConnection::isReusable)
-                .filter(connection -> connection.remoteEndpoint().address().equals(remoteAddress))
+                .filter(connection -> connection.remoteEndpoint().address().equals(key.remoteAddress()))
+                .filter(connection -> connection.key().securityProfile().equals(key.securityProfile()))
+                .filter(connection -> connection.key().peerIdentity().isBlank()
+                        || key.peerIdentity().isBlank()
+                        || connection.key().peerIdentity().equalsIgnoreCase(key.peerIdentity()))
                 .findFirst();
     }
 

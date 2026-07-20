@@ -12,6 +12,8 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.DecoderException;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.loomsip.codec.SipMessageEncoder;
@@ -29,9 +31,14 @@ import org.loomsip.transport.TransportEndpoint;
 import org.loomsip.transport.TransportException;
 import org.loomsip.transport.TransportProtocol;
 import org.loomsip.transport.TransportState;
+import org.loomsip.transport.TlsHandshakeException;
+import org.loomsip.transport.TlsPeerVerificationException;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLPeerUnverifiedException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.security.cert.CertificateException;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -74,12 +81,14 @@ import java.util.concurrent.TimeUnit;
  * immutable messages and transport failures through the existing handler
  * boundary; stage 5D will translate connection failures into mailbox events.</p>
  */
-public final class NettyTcpTransport implements SipTransport {
+public class NettyTcpTransport implements SipTransport {
 
     private static final System.Logger LOGGER = System.getLogger(NettyTcpTransport.class.getName());
     private static final long SHUTDOWN_TIMEOUT_SECONDS = 5;
 
     private final TcpTransportConfig config;
+    private final TransportProtocol protocol;
+    private final TlsTransportConfig tlsConfig;
     private final SipMessageParser parser;
     private final SipMessageEncoder encoder = new SipMessageEncoder();
     private final SipMessageHandler handler;
@@ -119,7 +128,38 @@ public final class NettyTcpTransport implements SipTransport {
             SipParserLimits parserLimits,
             SipMessageHandler handler
     ) {
+        this(TransportProtocol.TCP, config, parserLimits, handler, null);
+    }
+
+    /**
+     * Creates the shared reliable-stream implementation used by TCP and TLS.
+     *
+     * @param protocol TCP or TLS protocol
+     * @param config common listener, framing, and connection configuration
+     * @param parserLimits complete-message parser limits
+     * @param handler decoded message and transport diagnostic callback
+     * @param tlsConfig TLS engine configuration, or {@code null} for plain TCP
+     */
+    NettyTcpTransport(
+            TransportProtocol protocol,
+            TcpTransportConfig config,
+            SipParserLimits parserLimits,
+            SipMessageHandler handler,
+            TlsTransportConfig tlsConfig
+    ) {
+        this.protocol = Objects.requireNonNull(protocol, "protocol");
+        if (protocol == TransportProtocol.UDP) {
+            throw new IllegalArgumentException("reliable stream transport cannot use UDP");
+        }
+        if (protocol == TransportProtocol.TLS) {
+            if (tlsConfig == null) {
+                throw new IllegalArgumentException("TLS protocol requires TLS configuration");
+            }
+        } else if (tlsConfig != null) {
+            throw new IllegalArgumentException("TLS configuration requires the TLS protocol");
+        }
         this.config = Objects.requireNonNull(config, "config");
+        this.tlsConfig = tlsConfig;
         this.parser = new SipMessageParser(Objects.requireNonNull(parserLimits, "parserLimits"));
         this.handler = Objects.requireNonNull(handler, "handler");
         this.connectionManager = new ConnectionManager(config.connectionLimits());
@@ -129,7 +169,7 @@ public final class NettyTcpTransport implements SipTransport {
     public void start() throws TransportException {
         synchronized (lifecycleMonitor) {
             if (state != TransportState.NEW) {
-                throw new TransportException("TCP transport cannot start from state " + state);
+                throw new TransportException(protocol + " transport cannot start from state " + state);
             }
             state = TransportState.STARTING;
 
@@ -140,14 +180,14 @@ public final class NettyTcpTransport implements SipTransport {
             try {
                 newBossGroup = new NioEventLoopGroup(
                         1,
-                        new DefaultThreadFactory("loomsip-tcp-accept", true)
+                        new DefaultThreadFactory("loomsip-" + protocolName() + "-accept", true)
                 );
                 newWorkerGroup = new NioEventLoopGroup(
                         1,
-                        new DefaultThreadFactory("loomsip-tcp-io", true)
+                        new DefaultThreadFactory("loomsip-" + protocolName() + "-io", true)
                 );
                 newHandlerExecutor = Executors.newThreadPerTaskExecutor(
-                        Thread.ofVirtual().name("loomsip-tcp-handler-", 0).factory()
+                        Thread.ofVirtual().name("loomsip-" + protocolName() + "-handler-", 0).factory()
                 );
                 bossGroup = newBossGroup;
                 workerGroup = newWorkerGroup;
@@ -158,9 +198,9 @@ public final class NettyTcpTransport implements SipTransport {
                         .sync()
                         .channel();
                 serverChannel = newServerChannel;
-                localEndpoint = TransportEndpoint.tcp(socketAddress(
+                localEndpoint = new TransportEndpoint(protocol, socketAddress(
                         newServerChannel.localAddress(),
-                        "TCP listener local address"
+                        protocol + " listener local address"
                 ));
                 state = TransportState.RUNNING;
                 newServerChannel.closeFuture().addListener(ignored -> handleServerChannelClosed());
@@ -173,7 +213,7 @@ public final class NettyTcpTransport implements SipTransport {
                         newWorkerGroup,
                         newBossGroup
                 );
-                throw new TransportException("interrupted while binding TCP transport", exception);
+                throw new TransportException("interrupted while binding " + protocol + " transport", exception);
             } catch (Throwable cause) {
                 state = TransportState.FAILED;
                 releaseResources(
@@ -183,7 +223,7 @@ public final class NettyTcpTransport implements SipTransport {
                         newBossGroup
                 );
                 throw new TransportException(
-                        "failed to bind TCP transport to " + config.bindAddress(),
+                        "failed to bind " + protocol + " transport to " + config.bindAddress(),
                         cause
                 );
             }
@@ -206,6 +246,9 @@ public final class NettyTcpTransport implements SipTransport {
         return new ChannelInitializer<>() {
             @Override
             protected void initChannel(SocketChannel channel) {
+                if (tlsConfig != null) {
+                    channel.pipeline().addLast(newSslHandler(channel, outboundKey));
+                }
                 long idleMillis = config.connectionLimits().idleTimeout().toMillis();
                 channel.pipeline().addLast(new IdleStateHandler(
                         0,
@@ -225,20 +268,51 @@ public final class NettyTcpTransport implements SipTransport {
         };
     }
 
+    private SslHandler newSslHandler(SocketChannel channel, ConnectionKey outboundKey) {
+        SslContext context = outboundKey == null
+                ? tlsConfig.serverContext()
+                : tlsConfig.clientContext();
+        SslHandler handler;
+        if (outboundKey == null) {
+            handler = context.newHandler(channel.alloc());
+        } else {
+            handler = context.newHandler(
+                    channel.alloc(),
+                    outboundKey.peerIdentity(),
+                    outboundKey.remoteAddress().getPort()
+            );
+            if (tlsConfig.hostnameVerification()) {
+                SSLParameters parameters = handler.engine().getSSLParameters();
+                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                handler.engine().setSSLParameters(parameters);
+            }
+        }
+        if (!tlsConfig.enabledProtocols().isEmpty()) {
+            handler.engine().setEnabledProtocols(tlsConfig.enabledProtocols().toArray(String[]::new));
+        }
+        if (!tlsConfig.enabledCipherSuites().isEmpty()) {
+            handler.engine().setEnabledCipherSuites(
+                    tlsConfig.enabledCipherSuites().toArray(String[]::new)
+            );
+        }
+        handler.setHandshakeTimeoutMillis(tlsConfig.handshakeTimeoutMillis());
+        return handler;
+    }
+
     @Override
     public CompletionStage<SendResult> send(SipMessage message, TransportEndpoint target) {
         Objects.requireNonNull(message, "message");
         Objects.requireNonNull(target, "target");
-        if (target.protocol() != TransportProtocol.TCP) {
-            return failedSend("TCP transport cannot send to " + target.protocol(), null);
+        if (target.protocol() != protocol) {
+            return failedSend(protocol + " transport cannot send to " + target.protocol(), null);
         }
         if (target.address().getPort() == 0) {
-            return failedSend("TCP target port must not be zero", null);
+            return failedSend(protocol + " target port must not be zero", null);
         }
 
         TransportState currentState = state;
         if (currentState != TransportState.RUNNING) {
-            return failedSend("TCP transport is not running (state " + currentState + ")", null);
+            return failedSend(protocol + " transport is not running (state " + currentState + ")", null);
         }
 
         byte[] encoded = encoder.encode(message);
@@ -246,9 +320,11 @@ public final class NettyTcpTransport implements SipTransport {
         pendingSends.add(result);
 
         ConnectionKey key = new ConnectionKey(
-                TransportProtocol.TCP,
+                protocol,
                 config.bindAddress(),
-                target.address()
+                target.address(),
+                tlsConfig == null ? "" : tlsConfig.securityProfile(),
+                tlsConfig == null ? "" : target.address().getHostString()
         );
         CompletionStage<NettyTransportConnection> connectionStage = connectionManager.acquire(
                 key,
@@ -259,7 +335,7 @@ public final class NettyTcpTransport implements SipTransport {
             if (connectFailure != null) {
                 pendingSends.remove(result);
                 result.completeExceptionally(transportFailure(
-                        "failed to acquire TCP connection to " + target.address(),
+                        "failed to acquire " + protocol + " connection to " + target.address(),
                         connectFailure
                 ));
                 return;
@@ -270,7 +346,7 @@ public final class NettyTcpTransport implements SipTransport {
                     result.complete(sendResult);
                 } else {
                     result.completeExceptionally(transportFailure(
-                            "failed to send TCP SIP message to " + target.address(),
+                            "failed to send " + protocol + " SIP message to " + target.address(),
                             sendFailure
                     ));
                 }
@@ -283,7 +359,7 @@ public final class NettyTcpTransport implements SipTransport {
         EventLoopGroup group = workerGroup;
         if (group == null || state != TransportState.RUNNING) {
             return CompletableFuture.failedFuture(new TransportException(
-                    "TCP transport stopped before connect began"
+                    protocol + " transport stopped before connect began"
             ));
         }
 
@@ -303,28 +379,50 @@ public final class NettyTcpTransport implements SipTransport {
             connectFuture.addListener(completed -> {
                 if (!completed.isSuccess()) {
                     result.completeExceptionally(new TransportException(
-                            "failed to connect TCP channel to " + key.remoteAddress(),
+                            "failed to connect " + protocol + " channel to " + key.remoteAddress(),
                             completed.cause()
                     ));
                     return;
                 }
                 Channel channel = ((ChannelFuture) completed).channel();
-                NettyTransportConnection connection = ensureConnection(channel, key);
-                if (connection.isReusable()) {
-                    result.complete(connection);
-                } else {
-                    result.completeExceptionally(new TransportException(
-                            "TCP channel closed while connect completed"
-                    ));
+                SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
+                if (sslHandler == null) {
+                    completeConnectedChannel(channel, key, result);
+                    return;
                 }
+                sslHandler.handshakeFuture().addListener(handshake -> {
+                    if (handshake.isSuccess()) {
+                        completeConnectedChannel(channel, key, result);
+                    } else {
+                        result.completeExceptionally(tlsHandshakeFailure(
+                                key.remoteAddress(),
+                                handshake.cause()
+                        ));
+                    }
+                });
             });
         } catch (Throwable cause) {
             result.completeExceptionally(new TransportException(
-                    "failed to submit TCP connect to " + key.remoteAddress(),
+                    "failed to submit " + protocol + " connect to " + key.remoteAddress(),
                     cause
             ));
         }
         return result;
+    }
+
+    private void completeConnectedChannel(
+            Channel channel,
+            ConnectionKey key,
+            CompletableFuture<NettyTransportConnection> result
+    ) {
+        NettyTransportConnection connection = ensureConnection(channel, key);
+        if (connection.isReusable()) {
+            result.complete(connection);
+        } else {
+            result.completeExceptionally(new TransportException(
+                    protocol + " channel closed while connect completed"
+            ));
+        }
     }
 
     void channelActive(Channel channel, ConnectionKey outboundKey) {
@@ -332,13 +430,37 @@ public final class NettyTcpTransport implements SipTransport {
             ensureConnection(channel, outboundKey);
             return;
         }
-        InetSocketAddress local = socketAddress(channel.localAddress(), "TCP local address");
-        InetSocketAddress remote = socketAddress(channel.remoteAddress(), "TCP remote address");
-        ConnectionKey inboundKey = new ConnectionKey(TransportProtocol.TCP, local, remote);
+        InetSocketAddress local = socketAddress(channel.localAddress(), protocol + " local address");
+        InetSocketAddress remote = socketAddress(channel.remoteAddress(), protocol + " remote address");
+        ConnectionKey inboundKey = new ConnectionKey(
+                protocol,
+                local,
+                remote,
+                tlsConfig == null ? "" : tlsConfig.securityProfile(),
+                ""
+        );
         NettyTransportConnection connection = ensureConnection(channel, inboundKey);
+        SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
+        if (sslHandler != null) {
+            sslHandler.handshakeFuture().addListener(handshake -> {
+                if (handshake.isSuccess()) {
+                    registerInbound(inboundKey, connection);
+                } else {
+                    connection.fail(tlsHandshakeFailure(remote, handshake.cause()));
+                }
+            });
+            return;
+        }
+        registerInbound(inboundKey, connection);
+    }
+
+    private void registerInbound(
+            ConnectionKey inboundKey,
+            NettyTransportConnection connection
+    ) {
         if (!connectionManager.registerInbound(inboundKey, connection)) {
             connection.fail(new TransportException(
-                    "TCP inbound connection rejected by configured limits"
+                    protocol + " inbound connection rejected by configured limits"
             ));
         }
     }
@@ -347,12 +469,12 @@ public final class NettyTcpTransport implements SipTransport {
         NettyTransportConnection connection = channelConnections.get(channel.id());
         if (connection == null) {
             channelFailure(channel, new IllegalStateException(
-                    "TCP message arrived before connection registration"
+                    protocol + " message arrived before connection registration"
             ));
             return;
         }
         TransportContext context = new TransportContext(
-                TransportProtocol.TCP,
+                protocol,
                 connection.localEndpoint().address(),
                 connection.remoteEndpoint().address()
         );
@@ -366,7 +488,13 @@ public final class NettyTcpTransport implements SipTransport {
             dispatchError(cause);
             return;
         }
-        connection.fail(cause);
+        SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
+        boolean handshakeFailure = sslHandler != null
+                && (!sslHandler.handshakeFuture().isDone() || !sslHandler.handshakeFuture().isSuccess());
+        Throwable failure = handshakeFailure
+                ? tlsHandshakeFailure(connection.remoteEndpoint().address(), cause)
+                : cause;
+        connection.fail(failure);
     }
 
     void channelInactive(Channel channel) {
@@ -394,7 +522,7 @@ public final class NettyTcpTransport implements SipTransport {
         SipParseException parseFailure = findCause(failure, SipParseException.class);
         if (parseFailure != null) {
             TransportContext context = new TransportContext(
-                    TransportProtocol.TCP,
+                    protocol,
                     connection.localEndpoint().address(),
                     connection.remoteEndpoint().address()
             );
@@ -441,7 +569,7 @@ public final class NettyTcpTransport implements SipTransport {
     }
 
     private static void logErrorHandlerFailure(Throwable cause) {
-        LOGGER.log(System.Logger.Level.WARNING, "SIP TCP transport error callback failed", cause);
+        LOGGER.log(System.Logger.Level.WARNING, "SIP stream transport error callback failed", cause);
     }
 
     private void handleServerChannelClosed() {
@@ -454,7 +582,7 @@ public final class NettyTcpTransport implements SipTransport {
         }
         if (unexpected) {
             TransportException failure = new TransportException(
-                    "TCP listener channel closed unexpectedly"
+                    protocol + " listener channel closed unexpectedly"
             );
             Thread.startVirtualThread(() -> {
                 invokeErrorHandler(failure);
@@ -473,7 +601,7 @@ public final class NettyTcpTransport implements SipTransport {
     public TransportEndpoint localEndpoint() {
         TransportEndpoint endpoint = localEndpoint;
         if (endpoint == null) {
-            throw new IllegalStateException("TCP transport has not bound a local endpoint");
+            throw new IllegalStateException(protocol + " transport has not bound a local endpoint");
         }
         return endpoint;
     }
@@ -535,7 +663,7 @@ public final class NettyTcpTransport implements SipTransport {
             }
             connectionManager.close();
             TransportException closedFailure = new TransportException(
-                    "TCP transport closed before send completed"
+                    protocol + " transport closed before send completed"
             );
             pendingSends.forEach(future -> future.completeExceptionally(closedFailure));
             pendingSends.clear();
@@ -604,6 +732,41 @@ public final class NettyTcpTransport implements SipTransport {
             return inetSocketAddress;
         }
         throw new IllegalStateException(description + " is unavailable");
+    }
+
+    private String protocolName() {
+        return protocol.name().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static TransportException tlsHandshakeFailure(
+            InetSocketAddress remoteAddress,
+            Throwable cause
+    ) {
+        Throwable actual = cause == null ? new IllegalStateException("unknown TLS handshake failure") : cause;
+        if (isPeerVerificationFailure(actual)) {
+            return new TlsPeerVerificationException(
+                    "TLS peer verification failed for " + remoteAddress,
+                    actual
+            );
+        }
+        return new TlsHandshakeException(
+                "TLS handshake failed for " + remoteAddress,
+                actual
+        );
+    }
+
+    private static boolean isPeerVerificationFailure(Throwable cause) {
+        Throwable current = cause;
+        while (current != null) {
+            if (current instanceof SSLPeerUnverifiedException
+                    || current instanceof CertificateException
+                    || (current.getMessage() != null
+                    && current.getMessage().toLowerCase(java.util.Locale.ROOT).contains("no name matching"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static TransportException transportFailure(String message, Throwable cause) {

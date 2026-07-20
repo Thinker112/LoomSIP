@@ -47,4 +47,14 @@ public record TransportEndpoint(
     public static TransportEndpoint tcp(InetSocketAddress address) {
         return new TransportEndpoint(TransportProtocol.TCP, address);
     }
+
+    /**
+     * Creates a TLS endpoint.
+     *
+     * @param address resolved TLS socket address
+     * @return TLS endpoint
+     */
+    public static TransportEndpoint tls(InetSocketAddress address) {
+        return new TransportEndpoint(TransportProtocol.TLS, address);
+    }
 }

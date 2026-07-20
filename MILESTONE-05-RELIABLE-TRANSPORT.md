@@ -13,7 +13,7 @@
 
 第五阶段在不改变 Transaction/Dialog 串行模型的前提下，引入 TCP/TLS 流式分帧、连接复用、连接失败传播和资源限制。
 
-实施状态：5A、5B 已完成（2026-07-17），5C～5F 待执行。
+实施状态：5A～5C 已完成（2026-07-20），5D～5F 待执行。
 
 ## 2. 阶段目标
 
@@ -351,6 +351,8 @@ CompletionStage<SendResult>
 
 ## 7. 5C：TLS Transport
 
+实施状态：已完成（2026-07-20）。
+
 TLS Transport 复用 5A 分帧和 5B 连接管理，只在 Pipeline、连接键和安全配置上增加 TLS 语义。
 
 ### 7.1 配置模型
@@ -419,6 +421,28 @@ SIP handler pipeline
 - TLS 连接复用。
 - 握手期间 close/send 竞态。
 - TLS 上完整 INVITE/ACK/BYE 流程。
+
+已实现组件：
+
+- `TlsTransportConfig`：组合 server/client `SslContext`、握手超时、主机名校验、TLS profile、协议和 cipher allow-list。
+- `NettyTlsTransport`：复用 `NettyTcpTransport` 的 Client/Server、连接复用、流分帧和关闭生命周期。
+- `TlsHandshakeException`、`TlsPeerVerificationException`：区分握手失败与证书/对端身份校验失败。
+- `ConnectionKey`：将 TLS profile 和 outbound peer identity/SNI 纳入连接复用决策。
+- TLS Pipeline：`SslHandler -> IdleStateHandler -> SipStreamDecoder -> TcpChannelHandler`。
+
+实现边界：
+
+- TLS 握手完成前不登记可复用连接，也不向 SIP Decoder 投递明文消息。
+- Client 使用目标地址的 host name 作为 SNI；启用主机名校验时使用 JSSE `HTTPS` endpoint identification。
+- 证书不受信任、主机名不匹配、握手超时均完成发送 Future，并关闭对应连接。
+- TLS 失败不会降级为 TCP；TLS profile 或目标身份不同不会复用同一出站连接。
+- `SslContext` 由调用方构建，配置的 `toString()` 不输出证书、私钥或信任材料。
+- 5C 不实现 Digest、Transaction 失败事件桥接、写队列字节上限和 RFC 3263；分别留到后续阶段。
+
+已验证测试：
+
+- `TlsTransportConfigTest`：2 个配置校验、TLS profile 和敏感上下文脱敏场景。
+- `NettyTlsTransportTest`：4 个受信任收发/复用、不受信任证书、主机名失败、握手超时、明文隔离和 Idle 场景。
 
 ## 8. 5D：Transport 选择与 Transaction 集成
 

@@ -37,11 +37,11 @@ final class NettyTransportConnection implements TransportConnection {
         this.key = Objects.requireNonNull(key, "key");
         this.channel = Objects.requireNonNull(channel, "channel");
         this.id = new TransportConnectionId(channel.id().asLongText());
-        this.localEndpoint = TransportEndpoint.tcp(NettyTcpTransport.socketAddress(
+        this.localEndpoint = new TransportEndpoint(key.protocol(), NettyTcpTransport.socketAddress(
                 channel.localAddress(),
                 "TCP connection local address"
         ));
-        this.remoteEndpoint = TransportEndpoint.tcp(NettyTcpTransport.socketAddress(
+        this.remoteEndpoint = new TransportEndpoint(key.protocol(), NettyTcpTransport.socketAddress(
                 channel.remoteAddress(),
                 "TCP connection remote address"
         ));
