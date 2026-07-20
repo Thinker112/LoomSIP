@@ -12,7 +12,7 @@
 
 现有 Transaction 表示一次 SIP 请求尝试，Dialog 则拥有跨 Transaction 的 Call-ID、Tag、CSeq、Route Set 和 Remote Target。Digest 认证可能在一个逻辑请求中依次创建未认证和已认证的多个 Transaction；PRACK、UPDATE 和 Session Timer 又需要复用 Dialog 的顺序化状态。因此，本阶段不能把认证重试直接塞入现有 Transaction 状态机，也不能让认证组件绕过 Dialog Mailbox 修改 CSeq。
 
-实施状态：6A 已完成（2026-07-20），6B～6G 待执行。
+实施状态：6A～6B 已完成（2026-07-20），6C～6G 待执行。
 
 ## 2. RFC 范围与必要性
 
@@ -233,6 +233,8 @@ INFO       CONFIRMED           no                 no
 
 ## 7. 6B：UAC Digest Authentication
 
+实施状态：已完成（2026-07-20）。
+
 ### 7.1 组件关系
 
 ```text
@@ -290,6 +292,24 @@ request target + realm + username hint + origin/proxy + algorithm
 ```
 
 Provider 可以在虚拟线程上阻塞访问安全存储，但不能运行在 Netty EventLoop 或 Transaction Mailbox 的 drain 调用栈中。Credential、密码和计算中的中间值不得进入日志、异常消息或 `toString()`。
+
+### 7.4 已实现组件与边界
+
+- `DigestChallengeParser`：解析一个 `Digest` Challenge Header，支持 quoted-string 转义、`realm`、`nonce`、`opaque`、`algorithm`、`qop`、`stale` 和 `charset`。多个 Challenge 通过多个 SIP Header Field 提供；非 Digest scheme 被忽略。
+- `DigestAlgorithm`、`DigestQop`、`DigestCharset`：初版仅接受 MD5、SHA-256、`qop=auth` 与默认 ISO-8859-1/显式 UTF-8。
+- `DigestCalculator`：无状态计算 RFC Digest `qop=auth` 响应；`DigestAuthorization` 只渲染必要参数，Credential/密码不进入对象字符串或异常信息。
+- `ClientDigestCredential`：Provider 每次返回一个所有权转移的凭据对象；协调器在计算完成或关闭后清除密码字符。
+- `ClientAuthenticationCoordinator`：使用容量受限 Mailbox 串行化 initial attempt、401/407、异步凭据查询、请求重建、新 attempt 和关闭；多个可用 Challenge 按算法强度优先 SHA-256。
+- `AuthenticatedRequestRetryFactory`：由调用方生成新的 Via branch 与 CSeq；in-dialog 场景必须经 Dialog Mailbox 分配 CSeq。协调器在重建结果上替换当前 scope 的 `Authorization` 或 `Proxy-Authorization`，并保留另一 scope 的认证头。
+- 每个协调器按 origin/proxy、realm、nonce、username 和算法维护 `nc`，每次 qop-auth 重试生成新的 `cnonce`。
+
+当前尚未存在统一 Stack API，因此 6B 提供可独立装配的协调器，而没有猜测性地向各类 Transaction callback 自动植入认证逻辑。调用方应在 Transaction 的 response callback 中调用 `onResponse(...)`；INVITE 非 2xx ACK 仍先由原 ICT 完成，再启动认证 retry。
+
+已验证测试：
+
+- `DigestChallengeParserTest`：转义参数、默认 MD5、qop 选择及非法/不支持 Challenge。
+- `DigestCalculatorTest`：RFC MD5 qop-auth 向量、SHA-256 计算和 Authorization 转义。
+- `ClientAuthenticationCoordinatorTest`：401、407、SHA-256 优先、provisional、最终完成和重试上限。
 
 ## 8. 6C：UAS Digest Authentication
 
@@ -477,8 +497,12 @@ org.loomsip.auth
   DigestChallenge
   DigestAuthorization
   DigestAlgorithm
+  DigestQop
+  DigestCharset
   DigestCalculator
   ClientCredentialProvider
+  ClientDigestCredential
+  ClientAuthenticationPolicy
   DigestCredentialRepository
   DigestNonceManager
   ClientAuthenticationCoordinator
@@ -496,9 +520,10 @@ org.loomsip.dialog
   DialogSessionState
   SessionTimerManager
 
-org.loomsip.message.header
+org.loomsip.auth
   DigestChallengeParser
-  DigestAuthorizationParser
+
+org.loomsip.message.header
   RSeqHeaderValue
   RAckHeaderValue
   SessionExpiresHeaderValue
