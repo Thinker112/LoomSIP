@@ -13,7 +13,7 @@
 
 第五阶段在不改变 Transaction/Dialog 串行模型的前提下，引入 TCP/TLS 流式分帧、连接复用、连接失败传播和资源限制。
 
-实施状态：5A～5E 已完成（2026-07-20），5F 待执行。
+实施状态：5A～5F 已完成（2026-07-20）。
 
 ## 2. 阶段目标
 
@@ -637,6 +637,8 @@ TlsPeerVerificationException
 
 ## 10. 5F：完整场景和验收
 
+实施状态：已完成（2026-07-20）。
+
 ### 10.1 TCP 场景
 
 ```text
@@ -691,6 +693,20 @@ INVITE over TCP
 - 核心类和方法包含 Javadoc，协调组件类注释包含 ASCII 关系图。
 - `mvn clean test` 和 `mvn javadoc:javadoc` 通过且无警告。
 
+### 10.5 已实现验收夹具
+
+新增 `ReliableTransportDialogIntegrationTest`，在真实 Netty 回环连接上分别执行 TCP 和 TLS 场景。测试夹具直接装配现有 Transport Registry、Transaction Manager、Dialog Manager 和 `DialogTransactionBridge`，暂不提前引入尚未稳定的 Stack API。
+
+已验证内容：
+
+- INVITE、180、200、2xx ACK、re-INVITE、200、2xx ACK、BYE、200 完整流程。
+- TCP/TLS 首次建连后的连接复用，整个呼叫期间两端均保持一条活动连接。
+- 在服务端延迟最终响应期间推进虚拟时间，确认可靠传输不会启动 Timer A。
+- TCP/TLS 事务最终状态和 Dialog 状态均被清理；测试不使用真实等待来推进 SIP Timer。
+- TLS 使用临时 JDK `keytool` 证书，目标身份为 `localhost`，握手和主机名校验先于 SIP 收发完成。
+- re-INVITE 的本地/远端 CSeq、Contact、Remote Target 和两次 2xx ACK 数量正确。
+- Transport、Transaction 和 Dialog 的失败回调均汇聚到测试失败通道，避免异步错误被吞掉。
+
 ## 11. 建议代码组织
 
 继续保持单 Maven module：
@@ -735,7 +751,7 @@ org.loomsip.transport.netty
 
 ## 13. 后续阶段
 
-第五阶段完成后建议进入“认证与 SIP 扩展”：
+第五阶段已经完成，下一阶段建议进入“认证与 SIP 扩展”：
 
 - RFC 3261 Digest Authentication。
 - RFC 7616 SHA-256 Digest 扩展评估。
