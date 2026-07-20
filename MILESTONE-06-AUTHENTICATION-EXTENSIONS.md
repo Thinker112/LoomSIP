@@ -12,7 +12,7 @@
 
 现有 Transaction 表示一次 SIP 请求尝试，Dialog 则拥有跨 Transaction 的 Call-ID、Tag、CSeq、Route Set 和 Remote Target。Digest 认证可能在一个逻辑请求中依次创建未认证和已认证的多个 Transaction；PRACK、UPDATE 和 Session Timer 又需要复用 Dialog 的顺序化状态。因此，本阶段不能把认证重试直接塞入现有 Transaction 状态机，也不能让认证组件绕过 Dialog Mailbox 修改 CSeq。
 
-实施状态：6A～6C 已完成（2026-07-20），6D～6G 待执行。
+实施状态：6A～6D 已完成（2026-07-20），6E～6G 待执行。
 
 ## 2. RFC 范围与必要性
 
@@ -395,6 +395,8 @@ TU
 
 ## 9. 6D：PRACK / 100rel
 
+实施状态：已完成（2026-07-20）。
+
 ### 9.1 责任
 
 依据 RFC 3262 增加：
@@ -434,7 +436,45 @@ Reliable Provisional Exchange
 - 重复 PRACK 由 Transaction 层吸收，不重复通知 TU。
 - PRACK 认证重试复用 Client Request Exchange，不在 PRACK Transaction 内部重试。
 
+### 9.4 已实现组件与装配
+
+- `RSeqHeaderValue`、`RAckHeaderValue` 与 `SipHeaderValues.rseq/rack(...)`：解析并验证 RFC 3262 的强类型关联字段。
+- `SipExtensionSupport`：解析和写入 `Supported`、`Require`、`Unsupported` 的 option tag；用于构造 `Supported: 100rel`、`Require: 100rel`。
+- `ReliableProvisionalExchange`：一个 Dialog 一个 Mailbox，UAS 为应用标记为 `Require: 100rel` 的 101-199 响应补充 RSeq，在 UDP 上按 T1/T2 重传，只有匹配 RAck 才取消 Timer。
+- `ReliableProvisionalManager`：按完整 Dialog ID 保存 exchange，因此 fork 的各 Early Dialog 拥有独立 RSeq、RAck 与重传状态。
+- `DialogHandle.sendPrack(...)`：Early/Confirmed Dialog 内由 Dialog Mailbox 分配新的 CSeq、Via、Route Set 和 Remote Target，再启动独立 Non-INVITE Transaction。
+- `DialogTransactionBridge`：配置 manager 后，UAC 收到 `Require: 100rel` + RSeq 自动启动 PRACK；UAS 先校验 RAck，错误返回 481，随后才允许 PRACK 进入 Dialog/TU。未配置 manager 的 UAS 对 `Require: 100rel` INVITE 返回 420 和 `Unsupported: 100rel`。
+
+装配关系：
+
+```text
+UAC INVITE response -> DialogTransactionBridge -> ReliableProvisionalManager
+                                                -> DialogHandle.sendPrack -> NICT
+
+UAS application 183 + Require:100rel -> Bridged IST handle
+                                           -> ReliableProvisionalManager
+                                           -> RSeq + retransmission
+NIST PRACK -> ReliableProvisionalManager -> RAck match -> Dialog Bridge -> TU
+```
+
+当前无统一 Stack API，因此组装层需要创建 `ReliableProvisionalManager`，将其传入六参数 `DialogTransactionBridge` 构造器，并在 stack 关闭时调用其 `close()`。应用要在初始 INVITE 广告支持能力时，可通过 `SipExtensionSupport.withAdded(headers, "Supported", "100rel")` 构造新请求 Header。
+
+已验证测试：
+
+- `ReliableProvisionalHeaderValuesTest`：RSeq/RAck 与 option tag 解析/非法字段。
+- `ReliableProvisionalManagerTest`：虚拟时间 T1/T2 重传、匹配/不匹配 PRACK、同一 RSeq 去重和待确认响应上限。
+- `DialogInDialogRequestTest`：Early Dialog PRACK 的 RAck、新 CSeq、独立 Non-INVITE dispatch，以及普通扩展仍受 Early Dialog 限制。
+
 ## 10. 6E：UPDATE / Session Timer
+
+实施状态：进行中。6E-A 已完成 UPDATE 与 RFC 4028 Header 基础；Session Timer 协商、timer generation、刷新和 422 retry 待继续。
+
+### 10.0 已完成基础
+
+- `SessionExpiresHeaderValue`、`MinSeHeaderValue`、`SessionRefresher` 与 `SipHeaderValues.sessionExpires/minSe(...)`：解析和渲染 RFC 4028 基础 Header。
+- `DialogHandle.sendUpdate(...)`：UPDATE 使用独立 Non-INVITE Transaction，在 Early/Confirmed Dialog 中均由 Dialog Mailbox 分配新 CSeq、Via、Route Set 与 Remote Target。
+- UPDATE 被纳入 target-refresh Method：入站 UPDATE 带一个非 wildcard Contact 时更新 Remote Target，不改变 Dialog 的 Early/Confirmed 状态。
+- `SessionTimerHeaderValuesTest`、`DialogInDialogRequestTest`：覆盖 Header 解析、Early Dialog UPDATE、CSeq 与 target-refresh。
 
 ### 10.1 UPDATE
 

@@ -1,6 +1,7 @@
 package org.loomsip.dialog;
 
 import org.loomsip.message.SipHeaders;
+import org.loomsip.message.SipBody;
 import org.loomsip.message.SipMethod;
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipResponse;
@@ -12,6 +13,7 @@ import org.loomsip.message.header.DialogHeaderValues;
 import org.loomsip.message.header.RecordRouteHeaderValue;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
+import org.loomsip.message.header.SipExtensionSupport;
 import org.loomsip.transaction.TransportReliability;
 import org.loomsip.transaction.invite.InviteClientHandle;
 import org.loomsip.transaction.invite.InviteClientListener;
@@ -64,6 +66,7 @@ public final class DialogTransactionBridge {
     private final InviteServerListener serverDelegate;
     private final NonInviteClientListener nonInviteClientDelegate;
     private final NonInviteServerListener nonInviteServerDelegate;
+    private final ReliableProvisionalManager reliableProvisionals;
     private final DialogRoutePlanner routePlanner = new DialogRoutePlanner();
     private final ClientSide clientSide = new ClientSide();
     private final ServerSide serverSide = new ServerSide();
@@ -91,7 +94,8 @@ public final class DialogTransactionBridge {
                 (transaction, response, context) -> {
                 },
                 (transaction, request, context) -> {
-                }
+                },
+                null
         );
     }
 
@@ -111,6 +115,38 @@ public final class DialogTransactionBridge {
             NonInviteClientListener nonInviteClientDelegate,
             NonInviteServerListener nonInviteServerDelegate
     ) {
+        this(
+                dialogs,
+                clientDelegate,
+                serverDelegate,
+                nonInviteClientDelegate,
+                nonInviteServerDelegate,
+                null
+        );
+    }
+
+    /**
+     * Creates a bridge with optional RFC 3262 reliable provisional coordination.
+     *
+     * <p>The supplied manager is shared by client and server bridge adapters.
+     * The stack remains responsible for closing it after Dialog and transaction
+     * callbacks are stopped.</p>
+     *
+     * @param dialogs Dialog lifecycle owner
+     * @param clientDelegate application INVITE client listener
+     * @param serverDelegate application INVITE server listener
+     * @param nonInviteClientDelegate application Non-INVITE client listener
+     * @param nonInviteServerDelegate application Non-INVITE server listener
+     * @param reliableProvisionals optional RFC 3262 manager, or {@code null} to disable 100rel
+     */
+    public DialogTransactionBridge(
+            DialogManager dialogs,
+            InviteClientListener clientDelegate,
+            InviteServerListener serverDelegate,
+            NonInviteClientListener nonInviteClientDelegate,
+            NonInviteServerListener nonInviteServerDelegate,
+            ReliableProvisionalManager reliableProvisionals
+    ) {
         this.dialogs = Objects.requireNonNull(dialogs, "dialogs");
         this.clientDelegate = Objects.requireNonNull(clientDelegate, "clientDelegate");
         this.serverDelegate = Objects.requireNonNull(serverDelegate, "serverDelegate");
@@ -122,6 +158,7 @@ public final class DialogTransactionBridge {
                 nonInviteServerDelegate,
                 "nonInviteServerDelegate"
         );
+        this.reliableProvisionals = reliableProvisionals;
     }
 
     /**
@@ -514,6 +551,33 @@ public final class DialogTransactionBridge {
                         throw cause;
                     }
                 }
+                if (dialog.isPresent()
+                        && reliableProvisionals != null
+                        && response.statusCode() > 100
+                        && response.statusCode() < 200
+                        && SipExtensionSupport.contains(
+                        response.headers(),
+                        "Require",
+                        SipExtensionSupport.RELIABLE_PROVISIONAL
+                )) {
+                    Optional<org.loomsip.message.header.RAckHeaderValue> rack = awaitValue(
+                            reliableProvisionals.receiveUacResponse(
+                                    dialog.orElseThrow().id(),
+                                    transaction.originalRequest(),
+                                    response
+                            )
+                    );
+                    rack.ifPresent(value -> dialog.orElseThrow()
+                            .sendPrack(value, SipHeaders.empty(), SipBody.empty())
+                            .whenComplete((ignored, failure) -> {
+                                if (failure != null) {
+                                    reportClientFailure(
+                                            "failed to create PRACK for reliable provisional response",
+                                            failure
+                                    );
+                                }
+                            }));
+                }
             } catch (Throwable cause) {
                 reportClientFailure("failed to bridge INVITE client response", cause);
             }
@@ -559,6 +623,29 @@ public final class DialogTransactionBridge {
                 TransportContext context
         ) {
             try {
+                if (reliableProvisionals == null && SipExtensionSupport.contains(
+                        request.headers(),
+                        "Require",
+                        SipExtensionSupport.RELIABLE_PROVISIONAL
+                )) {
+                    SipResponse base = SipResponses.createResponse(
+                            request,
+                            420,
+                            "Bad Extension",
+                            SipHeaderValues.toTag(request.headers()).orElse("loomsip")
+                    );
+                    transaction.sendResponse(new SipResponse(
+                            base.version(),
+                            base.statusCode(),
+                            base.reasonPhrase(),
+                            base.headers().toBuilder().add(
+                                    "Unsupported",
+                                    SipExtensionSupport.RELIABLE_PROVISIONAL
+                            ).build(),
+                            base.body()
+                    ));
+                    return;
+                }
                 if (SipHeaderValues.toTag(request.headers()).isPresent()) {
                     DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
                     await(dialogs.receiveInDialogRequest(id, request));
@@ -691,6 +778,19 @@ public final class DialogTransactionBridge {
                 TransportContext context
         ) {
             try {
+                if (SipMethod.PRACK.equals(request.method()) && reliableProvisionals != null) {
+                    DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
+                    PrackValidation validation = awaitValue(reliableProvisionals.acceptPrack(id, request));
+                    if (validation != PrackValidation.ACCEPTED) {
+                        transaction.sendResponse(SipResponses.createResponse(
+                                request,
+                                481,
+                                "Call/Transaction Does Not Exist",
+                                SipHeaderValues.toTag(request.headers()).orElse("loomsip")
+                        ));
+                        return;
+                    }
+                }
                 if (SipHeaderValues.toTag(request.headers()).isPresent()) {
                     DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
                     await(dialogs.receiveInDialogRequest(id, request));
@@ -755,8 +855,36 @@ public final class DialogTransactionBridge {
             Objects.requireNonNull(response, "response");
             synchronized (responseMonitor) {
                 try {
-                    processServerResponse(this, response);
-                    delegate.sendResponse(response);
+                    SipResponse selected = response;
+                    DialogId reliableDialogId = null;
+                    if (reliableProvisionals != null
+                            && response.statusCode() > 100
+                            && response.statusCode() < 200
+                            && SipExtensionSupport.contains(
+                            response.headers(),
+                            "Require",
+                            SipExtensionSupport.RELIABLE_PROVISIONAL
+                    )) {
+                        reliableDialogId = DialogId.from(response.headers(), DialogRole.UAS);
+                        java.util.concurrent.atomic.AtomicReference<SipResponse> retransmit =
+                                new java.util.concurrent.atomic.AtomicReference<>();
+                        selected = awaitValue(reliableProvisionals.registerUasResponse(
+                                reliableDialogId,
+                                invite,
+                                response,
+                                reliability,
+                                () -> delegate.sendResponse(retransmit.get())
+                        ));
+                        retransmit.set(selected);
+                    }
+                    processServerResponse(this, selected);
+                    delegate.sendResponse(selected);
+                    if (reliableProvisionals != null
+                            && selected.statusCode() >= 200
+                            && SipHeaderValues.toTag(selected.headers()).isPresent()) {
+                        DialogId id = DialogId.from(selected.headers(), DialogRole.UAS);
+                        reliableProvisionals.release(id);
+                    }
                 } catch (Throwable cause) {
                     if (response.statusCode() >= 200 && response.statusCode() < 300) {
                         releaseSuccessReliability();

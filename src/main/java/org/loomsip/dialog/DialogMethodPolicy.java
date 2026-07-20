@@ -18,9 +18,9 @@ import java.util.Objects;
  *    +--> reject ACK / CANCEL transaction-independent semantics
  * }</pre>
  *
- * <p>Stage 6A allows generic extensions only in Confirmed Dialogs. PRACK Early
- * Dialog rules and UPDATE target-refresh behavior are added by their owning
- * extension stages rather than being guessed here.</p>
+ * <p>PRACK is the sole generic request permitted in an Early Dialog because
+ * RFC 3262 correlates it to one reliable provisional INVITE response. Other
+ * extensions remain Confirmed-Dialog-only until their owning stages.</p>
  */
 final class DialogMethodPolicy {
 
@@ -30,7 +30,9 @@ final class DialogMethodPolicy {
     static void requirePreparedRequest(SipMethod method, DialogState state) {
         Objects.requireNonNull(method, "method");
         Objects.requireNonNull(state, "state");
-        if (state != DialogState.CONFIRMED) {
+        if (state != DialogState.CONFIRMED
+                && !(state == DialogState.EARLY
+                && (SipMethod.PRACK.equals(method) || SipMethod.UPDATE.equals(method)))) {
             throw new IllegalStateException("in-Dialog requests require a confirmed Dialog");
         }
         if (SipMethod.ACK.equals(method) || SipMethod.CANCEL.equals(method)) {
@@ -56,7 +58,9 @@ final class DialogMethodPolicy {
             throws DialogRequestRejectedException {
         Objects.requireNonNull(method, "method");
         Objects.requireNonNull(state, "state");
-        if (state != DialogState.CONFIRMED) {
+        if (state != DialogState.CONFIRMED
+                && !(state == DialogState.EARLY
+                && (SipMethod.PRACK.equals(method) || SipMethod.UPDATE.equals(method)))) {
             throw new DialogRequestRejectedException(
                     481,
                     "Call/Transaction Does Not Exist",
@@ -73,7 +77,7 @@ final class DialogMethodPolicy {
     }
 
     static boolean refreshesTarget(SipMethod method) {
-        return SipMethod.INVITE.equals(method);
+        return SipMethod.INVITE.equals(method) || SipMethod.UPDATE.equals(method);
     }
 
     static boolean terminatesDialog(SipMethod method) {

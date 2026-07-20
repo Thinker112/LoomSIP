@@ -8,6 +8,7 @@ import org.loomsip.message.SipMethod;
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipUri;
 import org.loomsip.message.header.SentBy;
+import org.loomsip.message.header.RAckHeaderValue;
 import org.loomsip.message.header.SipHeaderValues;
 import org.loomsip.transaction.TransactionKey;
 import org.loomsip.transaction.TransactionMessageSender;
@@ -180,6 +181,57 @@ class DialogInDialogRequestTest {
             assertEquals(body, request.body());
             assertEquals(rig.remote, rig.dispatcher.targets.getFirst());
             assertEquals(11, dialog.snapshot().localCSeq());
+        }
+    }
+
+    @Test
+    void prackUsesEarlyDialogRoutingAndDedicatedRackHeader() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createEarlyDialog();
+            RAckHeaderValue rack = new RAckHeaderValue(7, 10, SipMethod.INVITE);
+
+            ClientTransactionHandle transaction = await(dialog.sendPrack(
+                    rack,
+                    SipHeaders.empty(),
+                    SipBody.empty()
+            ));
+
+            assertEquals(NonInviteClientState.TRYING, transaction.state());
+            SipRequest request = rig.dispatcher.nonInvites.getFirst();
+            assertEquals(SipMethod.PRACK, request.method());
+            assertEquals("7 10 INVITE", request.headers().firstValue("RAck").orElseThrow());
+            assertEquals(11, SipHeaderValues.cseq(request.headers()).sequenceNumber());
+            assertEquals(DialogState.EARLY, dialog.snapshot().state());
+            assertThrows(IllegalStateException.class, () -> await(dialog.sendRequest(
+                    SipMethod.INFO,
+                    SipHeaders.empty(),
+                    SipBody.empty()
+            )));
+        }
+    }
+
+    @Test
+    void updateIsAllowedInEarlyDialogAndRefreshesRemoteTarget() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createEarlyDialog();
+
+            ClientTransactionHandle transaction = await(dialog.sendUpdate(
+                    SipHeaders.builder().add("Contact", "<sip:alice@update-client.example.com>").build(),
+                    SipBody.empty()
+            ));
+
+            assertEquals(NonInviteClientState.TRYING, transaction.state());
+            SipRequest request = rig.dispatcher.nonInvites.getFirst();
+            assertEquals(SipMethod.UPDATE, request.method());
+            assertEquals(11, SipHeaderValues.cseq(request.headers()).sequenceNumber());
+            assertEquals(DialogState.EARLY, dialog.snapshot().state());
+
+            await(rig.manager.receiveInDialogRequest(
+                    dialog.id(),
+                    inbound(SipMethod.UPDATE, 21, true)
+            ));
+            assertEquals(Optional.of(SipUri.parse("sip:bob@refreshed.example.com")),
+                    dialog.snapshot().remoteTarget());
         }
     }
 
@@ -441,6 +493,21 @@ class DialogInDialogRequestTest {
                     10,
                     20,
                     routes,
+                    Optional.of(SipUri.parse("sip:bob@server.example.com")),
+                    false
+            ));
+        }
+
+        private DialogHandle createEarlyDialog() {
+            return manager.create(new DialogSnapshot(
+                    new DialogId("call@example.com", "local-tag", "remote-tag"),
+                    DialogRole.UAC,
+                    DialogState.EARLY,
+                    SipUri.parse("sip:alice@example.com"),
+                    SipUri.parse("sip:bob@example.com"),
+                    10,
+                    20,
+                    List.of(),
                     Optional.of(SipUri.parse("sip:bob@server.example.com")),
                     false
             ));

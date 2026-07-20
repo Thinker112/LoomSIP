@@ -121,6 +121,92 @@ public final class SipHeaderValues {
         return value;
     }
 
+    /**
+     * Parses the single RFC 3262 RSeq header.
+     *
+     * @param headers SIP message headers
+     * @return typed RSeq value
+     * @throws SipHeaderValueException if RSeq is missing, duplicated, or malformed
+     */
+    public static RSeqHeaderValue rseq(SipHeaders headers) throws SipHeaderValueException {
+        String value = requiredSingleValue(headers, "RSeq").strip();
+        try {
+            if (!isAsciiDigits(value)) {
+                throw new NumberFormatException("non-ASCII RSeq digits");
+            }
+            return new RSeqHeaderValue(Long.parseLong(value));
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid RSeq header", exception);
+        }
+    }
+
+    /**
+     * Parses the single RFC 3262 RAck header.
+     *
+     * @param headers SIP message headers
+     * @return typed RAck correlation value
+     * @throws SipHeaderValueException if RAck is missing, duplicated, or malformed
+     */
+    public static RAckHeaderValue rack(SipHeaders headers) throws SipHeaderValueException {
+        String value = requiredSingleValue(headers, "RAck").strip();
+        String[] components = value.split("[ \\t]+", -1);
+        if (components.length != 3) {
+            throw new SipHeaderValueException("RAck must contain RSeq, CSeq, and method");
+        }
+        try {
+            if (!isAsciiDigits(components[0]) || !isAsciiDigits(components[1])) {
+                throw new NumberFormatException("non-ASCII RAck sequence digits");
+            }
+            return new RAckHeaderValue(
+                    Long.parseLong(components[0]),
+                    Long.parseLong(components[1]),
+                    SipMethod.of(components[2])
+            );
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid RAck header", exception);
+        }
+    }
+
+    /** Parses one RFC 4028 Session-Expires header. */
+    public static SessionExpiresHeaderValue sessionExpires(SipHeaders headers) throws SipHeaderValueException {
+        String value = requiredSingleValue(headers, "Session-Expires").strip();
+        String[] parts = value.split(";", -1);
+        try {
+            if (!isAsciiDigits(parts[0].strip())) {
+                throw new NumberFormatException("non-ASCII session interval");
+            }
+            java.util.Optional<SessionRefresher> refresher = java.util.Optional.empty();
+            for (int index = 1; index < parts.length; index++) {
+                String[] parameter = parts[index].strip().split("=", 2);
+                if (parameter.length != 2 || parameter[0].strip().isEmpty()) {
+                    throw new IllegalArgumentException("invalid Session-Expires parameter");
+                }
+                if ("refresher".equalsIgnoreCase(parameter[0].strip())) {
+                    if (refresher.isPresent()) {
+                        throw new IllegalArgumentException("duplicate Session-Expires refresher");
+                    }
+                    refresher = java.util.Optional.of(SessionRefresher.parse(parameter[1].strip()));
+                }
+            }
+            return new SessionExpiresHeaderValue(Integer.parseInt(parts[0].strip()), refresher);
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Session-Expires header", exception);
+        }
+    }
+
+    /** Parses one RFC 4028 Min-SE header. */
+    public static MinSeHeaderValue minSe(SipHeaders headers) throws SipHeaderValueException {
+        String value = requiredSingleValue(headers, "Min-SE").strip();
+        try {
+            if (!isAsciiDigits(value)) {
+                throw new NumberFormatException("non-ASCII Min-SE interval");
+            }
+            return new MinSeHeaderValue(Integer.parseInt(value));
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Min-SE header", exception);
+        }
+    }
+
     private static ViaHeaderValue parseVia(String value) throws SipHeaderValueException {
         String stripped = value.strip();
         int whitespace = firstWhitespace(stripped);

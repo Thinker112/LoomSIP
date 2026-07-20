@@ -9,6 +9,7 @@ import org.loomsip.message.SipHeaders;
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipResponse;
 import org.loomsip.message.header.CSeqHeaderValue;
+import org.loomsip.message.header.RAckHeaderValue;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
 import org.loomsip.transaction.TransportReliability;
@@ -191,6 +192,39 @@ public final class SipDialog implements DialogHandle {
         }
         return prepareRequest(method, additionalHeaders, body)
                 .thenCompose(selected::sendNonInvite);
+    }
+
+    @Override
+    public CompletionStage<ClientTransactionHandle> sendPrack(
+            RAckHeaderValue rack,
+            SipHeaders additionalHeaders,
+            SipBody body
+    ) {
+        Objects.requireNonNull(rack, "rack");
+        Objects.requireNonNull(additionalHeaders, "additionalHeaders");
+        Objects.requireNonNull(body, "body");
+        DialogRequestRuntime selected = requestRuntime;
+        if (selected == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "Dialog request runtime is not configured"
+            ));
+        }
+        SipHeaders headers;
+        try {
+            headers = additionalHeaders.withReplaced("RAck", rack.wireValue());
+        } catch (RuntimeException exception) {
+            return CompletableFuture.failedFuture(exception);
+        }
+        return prepareRequest(SipMethod.PRACK, headers, body)
+                .thenCompose(selected::sendNonInvite);
+    }
+
+    @Override
+    public CompletionStage<ClientTransactionHandle> sendUpdate(
+            SipHeaders additionalHeaders,
+            SipBody body
+    ) {
+        return sendRequest(SipMethod.UPDATE, additionalHeaders, body);
     }
 
     CompletionStage<Void> transitionTo(DialogState target, DialogTerminationReason reason) {

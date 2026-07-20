@@ -3,6 +3,7 @@ package org.loomsip.dialog;
 import org.loomsip.message.SipBody;
 import org.loomsip.message.SipHeaders;
 import org.loomsip.message.SipMethod;
+import org.loomsip.message.header.RAckHeaderValue;
 import org.loomsip.transaction.invite.InviteClientHandle;
 import org.loomsip.transaction.noninvite.ClientTransactionHandle;
 
@@ -59,6 +60,36 @@ public interface DialogHandle {
      */
     CompletionStage<ClientTransactionHandle> sendRequest(
             SipMethod method,
+            SipHeaders additionalHeaders,
+            SipBody body
+    );
+
+    /**
+     * Constructs and starts a PRACK for one reliable provisional INVITE response.
+     *
+     * <p>PRACK is permitted in an Early or Confirmed Dialog. The Dialog owns
+     * its Via branch, Route Set, Remote Target, and new local CSeq; callers
+     * provide only the typed RFC 3262 RAck correlation value.</p>
+     *
+     * @param rack acknowledged reliable provisional response
+     * @param additionalHeaders optional PRACK extension or content headers
+     * @param body immutable PRACK body
+     * @return stage yielding the started Non-INVITE PRACK transaction
+     */
+    CompletionStage<ClientTransactionHandle> sendPrack(
+            RAckHeaderValue rack,
+            SipHeaders additionalHeaders,
+            SipBody body
+    );
+
+    /**
+     * Constructs and starts an UPDATE in an Early or Confirmed Dialog.
+     *
+     * @param additionalHeaders application headers such as Contact, Session-Expires, or Content-Type
+     * @param body immutable UPDATE body
+     * @return stage yielding the started Non-INVITE UPDATE transaction
+     */
+    CompletionStage<ClientTransactionHandle> sendUpdate(
             SipHeaders additionalHeaders,
             SipBody body
     );
