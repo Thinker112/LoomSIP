@@ -4,6 +4,7 @@ import org.loomsip.transport.ConnectionKey;
 import org.loomsip.transport.ConnectionLimits;
 import org.loomsip.transport.TransportConnection;
 import org.loomsip.transport.TransportConnectionId;
+import org.loomsip.transport.TransportLimitException;
 import org.loomsip.transport.TransportException;
 
 import java.net.InetAddress;
@@ -192,12 +193,12 @@ public final class ConnectionManager implements AutoCloseable {
                 return new TransportException("TCP connection manager is closed");
             }
             if (pendingConnects >= limits.maxPendingConnects()) {
-                return new TransportException(
+                return new TransportLimitException(
                         "TCP pending connect limit reached: " + limits.maxPendingConnects()
                 );
             }
             if (exceedsConnectionLimit(key.remoteAddress())) {
-                return new TransportException(
+                return new TransportLimitException(
                         "TCP connection limit reached for " + key.remoteAddress().getAddress()
                 );
             }

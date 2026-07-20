@@ -89,6 +89,11 @@ public final class NettyUdpTransport implements SipTransport {
      * retransmission, or implement SIP transaction timers. The concurrent set
      * allows sending threads, the Netty EventLoop, and {@link #close()} to
      * update the registry safely.</p>
+     *
+     * <p>For stream transports, this same concept must also be bounded by
+     * pending-write count and bytes. A slow peer can otherwise keep encoded
+     * buffers and completion stages alive indefinitely, causing one connection
+     * to consume unbounded memory and making shutdown harder to converge.</p>
      */
     private final Set<CompletableFuture<SendResult>> pendingSends = ConcurrentHashMap.newKeySet();
 

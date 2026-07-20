@@ -27,6 +27,7 @@ import org.loomsip.transport.SendResult;
 import org.loomsip.transport.SipMessageHandler;
 import org.loomsip.transport.SipTransport;
 import org.loomsip.transport.TransportContext;
+import org.loomsip.transport.TransportConnectException;
 import org.loomsip.transport.TransportEndpoint;
 import org.loomsip.transport.TransportException;
 import org.loomsip.transport.TransportProtocol;
@@ -95,6 +96,15 @@ public class NettyTcpTransport implements SipTransport {
     private final ConnectionManager connectionManager;
     private final Object lifecycleMonitor = new Object();
     private final CountDownLatch closedLatch = new CountDownLatch(1);
+    /**
+     * Transport-level send stages that have not reached a terminal result.
+     *
+     * <p>This tracks local write completion, not SIP response correlation or
+     * transaction retransmission. It exists so close/connect/write races can
+     * complete every stage already returned to callers. Stage 5E adds count and
+     * byte admission limits; without them a slow TCP/TLS peer could retain an
+     * unbounded number of encoded buffers and futures.</p>
+     */
     private final Set<CompletableFuture<SendResult>> pendingSends = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<io.netty.channel.ChannelId, NettyTransportConnection>
             channelConnections = new ConcurrentHashMap<>();
@@ -378,7 +388,7 @@ public class NettyTcpTransport implements SipTransport {
             ChannelFuture connectFuture = bootstrap.connect(key.remoteAddress());
             connectFuture.addListener(completed -> {
                 if (!completed.isSuccess()) {
-                    result.completeExceptionally(new TransportException(
+                    result.completeExceptionally(new TransportConnectException(
                             "failed to connect " + protocol + " channel to " + key.remoteAddress(),
                             completed.cause()
                     ));
@@ -402,7 +412,7 @@ public class NettyTcpTransport implements SipTransport {
                 });
             });
         } catch (Throwable cause) {
-            result.completeExceptionally(new TransportException(
+            result.completeExceptionally(new TransportConnectException(
                     "failed to submit " + protocol + " connect to " + key.remoteAddress(),
                     cause
             ));
@@ -511,7 +521,11 @@ public class NettyTcpTransport implements SipTransport {
     private NettyTransportConnection ensureConnection(Channel channel, ConnectionKey key) {
         return channelConnections.computeIfAbsent(
                 channel.id(),
-                ignored -> new NettyTransportConnection(key, channel)
+                ignored -> new NettyTransportConnection(
+                        key,
+                        channel,
+                        config.writeQueueLimits()
+                )
         );
     }
 

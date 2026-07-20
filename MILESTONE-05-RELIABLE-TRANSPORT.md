@@ -13,7 +13,7 @@
 
 第五阶段在不改变 Transaction/Dialog 串行模型的前提下，引入 TCP/TLS 流式分帧、连接复用、连接失败传播和资源限制。
 
-实施状态：5A～5D 已完成（2026-07-20），5E～5F 待执行。
+实施状态：5A～5E 已完成（2026-07-20），5F 待执行。
 
 ## 2. 阶段目标
 
@@ -541,6 +541,8 @@ ConnectionManager
 
 ## 9. 5E：资源限制和生命周期
 
+实施状态：已完成（2026-07-20）。
+
 ### 9.1 资源限制模型
 
 ```text
@@ -612,6 +614,26 @@ TlsPeerVerificationException
 ```
 
 异常类型要让 Transaction、日志和测试能够区分失败阶段，不能全部折叠为一个无上下文的 `TransportException`。
+
+已实现组件：
+
+- `WriteQueueLimits`：每条 TCP/TLS 连接限制待完成写操作数和编码字节数。
+- `TransportLimitException`：连接数、待建连接数和写队列超限时立即拒绝操作。
+- `TransportConnectException`、`TransportWriteException`、`TransportConnectionClosedException`：区分建连、写入和连接关闭失败。
+- `NettyTransportConnection`：在同一写锁内完成状态检查、额度占用、Future 注册和关闭释放，避免 send/close 竞态泄漏。
+- 关闭时所有 pending write Future 完成异常，待写数量和字节计数归零。
+
+实现边界：
+
+- 当前 5E 限制粒度是每条 TCP/TLS 连接；跨所有连接的全局写队列预算和公平调度留到后续 Stack/资源治理阶段。
+- 超限不会阻塞虚拟线程等待队列空间，也不会自动重试；调用方收到失败 Future 后由 Transaction 策略决定后续行为。
+- `pendingSends` 仍只跟踪本地写完成，不承担 SIP 响应关联和事务重传。
+
+已验证测试：
+
+- `WriteQueueLimitsTest`：非法数量/字节限制校验。
+- `NettyTransportConnectionTest`：写数量超限、单条消息字节超限、关闭时 Future 完成和额度释放。
+- TCP/TLS 回归测试继续验证连接关闭、RST、握手失败和 Idle Timeout 场景。
 
 ## 10. 5F：完整场景和验收
 
