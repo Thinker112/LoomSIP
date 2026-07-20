@@ -6,10 +6,13 @@ import org.loomsip.message.SipBody;
 import org.loomsip.message.SipHeaders;
 import org.loomsip.message.SipMethod;
 import org.loomsip.message.SipRequest;
+import org.loomsip.message.SipResponse;
+import org.loomsip.message.SipResponses;
 import org.loomsip.message.SipUri;
 import org.loomsip.message.header.SentBy;
 import org.loomsip.message.header.RAckHeaderValue;
 import org.loomsip.message.header.SipHeaderValues;
+import org.loomsip.message.header.SessionRefresher;
 import org.loomsip.transaction.TransactionKey;
 import org.loomsip.transaction.TransactionMessageSender;
 import org.loomsip.transaction.invite.InviteClientHandle;
@@ -22,6 +25,7 @@ import org.loomsip.transaction.noninvite.NonInviteClientState;
 import org.loomsip.transaction.noninvite.NonInviteServerState;
 import org.loomsip.transaction.noninvite.ServerTransactionHandle;
 import org.loomsip.transaction.timer.SipTimerConfig;
+import org.loomsip.transaction.timer.SipTimer;
 import org.loomsip.transaction.timer.VirtualSipScheduler;
 import org.loomsip.transport.SendResult;
 import org.loomsip.transport.TransportContext;
@@ -236,6 +240,169 @@ class DialogInDialogRequestTest {
     }
 
     @Test
+    void sessionTimerRefreshAndExpiryAreSerializedThroughDialog() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            await(rig.manager.configureSessionTimer(
+                    dialog.id(),
+                    new SessionTimerNegotiator.NegotiatedSessionTimer(
+                            120,
+                            SessionRefresher.UAC,
+                            SessionRefreshMethod.UPDATE
+                    ),
+                    true
+            ));
+
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(60));
+
+            SipRequest refresh = rig.dispatcher.nonInvites.getFirst();
+            assertEquals(SipMethod.UPDATE, refresh.method());
+            assertEquals("120;refresher=uac",
+                    refresh.headers().firstValue("Session-Expires").orElseThrow());
+            assertEquals(11, SipHeaderValues.cseq(refresh.headers()).sequenceNumber());
+        }
+
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            await(rig.manager.configureSessionTimer(
+                    dialog.id(),
+                    new SessionTimerNegotiator.NegotiatedSessionTimer(
+                            120,
+                            SessionRefresher.UAS,
+                            SessionRefreshMethod.UPDATE
+                    ),
+                    false
+            ));
+
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(120));
+
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+            assertTrue(rig.manager.find(dialog.id()).isEmpty());
+        }
+    }
+
+    @Test
+    void uasRejectsTooSmallUpdateBeforeApplicationCallback() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            AtomicInteger callbacks = new AtomicInteger();
+            RecordingServerTransaction transaction = new RecordingServerTransaction();
+            DialogTransactionBridge bridge = bridge(rig, (selected, request, context) ->
+                    callbacks.incrementAndGet());
+
+            bridge.nonInviteServerListener().onRequest(
+                    transaction,
+                    withSessionExpires(inbound(SipMethod.UPDATE, 21, true), "60;refresher=uac"),
+                    context(rig)
+            );
+
+            assertEquals(0, callbacks.get());
+            assertEquals(422, transaction.response.get().statusCode());
+            assertEquals("90", transaction.response.get().headers().firstValue("Min-SE").orElseThrow());
+            assertEquals(DialogState.CONFIRMED, dialog.snapshot().state());
+        }
+    }
+
+    @Test
+    void uasStartsUpdateSessionTimerOnlyWhenApplicationSendsSuccess() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            AtomicReference<ServerTransactionHandle> applicationHandle = new AtomicReference<>();
+            RecordingServerTransaction transaction = new RecordingServerTransaction();
+            DialogTransactionBridge bridge = bridge(rig, (selected, request, context) ->
+                    applicationHandle.set(selected));
+            SipRequest update = withSessionExpires(
+                    inbound(SipMethod.UPDATE, 21, true),
+                    "120;refresher=uac"
+            );
+
+            bridge.nonInviteServerListener().onRequest(transaction, update, context(rig));
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(120));
+            assertEquals(DialogState.CONFIRMED, dialog.snapshot().state());
+
+            applicationHandle.get().sendResponse(SipResponses.createResponse(update, 200, "OK"));
+            assertEquals("120;refresher=uac",
+                    transaction.response.get().headers().firstValue("Session-Expires").orElseThrow());
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(120));
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+        }
+    }
+
+    @Test
+    void uacSuccessReplacesGenerationAnd422RetriesOnlyOnce() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            await(rig.manager.configureSessionTimer(
+                    dialog.id(),
+                    negotiated(120),
+                    true
+            ));
+            DialogTransactionBridge bridge = bridge(rig, (transaction, request, context) -> {
+            });
+
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(60));
+            ClientTransactionHandle first = rig.dispatcher.nonInviteHandles.getFirst();
+            SipResponse success = withSessionExpires(
+                    SipResponses.createResponse(first.originalRequest(), 200, "OK"),
+                    "240;refresher=uac"
+            );
+            bridge.nonInviteClientListener().onResponse(first, success, context(rig));
+            bridge.nonInviteClientListener().onTimeout(first, SipTimer.F);
+            assertEquals(DialogState.CONFIRMED, dialog.snapshot().state());
+
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(60));
+            assertEquals(1, rig.dispatcher.nonInvites.size());
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(60));
+            assertEquals(2, rig.dispatcher.nonInvites.size());
+
+            ClientTransactionHandle second = rig.dispatcher.nonInviteHandles.get(1);
+            SipResponse first422 = responseWithHeader(
+                    second.originalRequest(),
+                    422,
+                    "Session Interval Too Small",
+                    "Min-SE",
+                    "300"
+            );
+            bridge.nonInviteClientListener().onResponse(second, first422, context(rig));
+            assertEquals(3, rig.dispatcher.nonInvites.size());
+            assertEquals(13, SipHeaderValues.cseq(rig.dispatcher.nonInvites.get(2).headers()).sequenceNumber());
+
+            ClientTransactionHandle retry = rig.dispatcher.nonInviteHandles.get(2);
+            bridge.nonInviteClientListener().onResponse(
+                    retry,
+                    responseWithHeader(
+                            retry.originalRequest(),
+                            422,
+                            "Session Interval Too Small",
+                            "Min-SE",
+                            "300"
+                    ),
+                    context(rig)
+            );
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+            assertEquals(3, rig.dispatcher.nonInvites.size());
+        }
+    }
+
+    @Test
+    void automaticRefreshTimeoutTerminatesDialog() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            await(rig.manager.configureSessionTimer(dialog.id(), negotiated(120), true));
+            DialogTransactionBridge bridge = bridge(rig, (transaction, request, context) -> {
+            });
+
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(60));
+            bridge.nonInviteClientListener().onTimeout(
+                    rig.dispatcher.nonInviteHandles.getFirst(),
+                    SipTimer.F
+            );
+
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+        }
+    }
+
+    @Test
     void genericApiRejectsMethodsWithDedicatedSemantics() throws Exception {
         try (TestRig rig = new TestRig()) {
             DialogHandle dialog = rig.createDialog();
@@ -416,6 +583,75 @@ class DialogInDialogRequestTest {
         return new SipRequest(method, SipUri.parse("sip:alice@client.example.com"), headers.build());
     }
 
+    private static SipRequest withSessionExpires(SipRequest request, String value) {
+        return new SipRequest(
+                request.method(),
+                request.requestUri(),
+                request.version(),
+                request.headers().withReplaced("Session-Expires", value),
+                request.body()
+        );
+    }
+
+    private static SipResponse withSessionExpires(SipResponse response, String value) {
+        return new SipResponse(
+                response.version(),
+                response.statusCode(),
+                response.reasonPhrase(),
+                response.headers().withReplaced("Session-Expires", value),
+                response.body()
+        );
+    }
+
+    private static SipResponse responseWithHeader(
+            SipRequest request,
+            int status,
+            String reason,
+            String name,
+            String value
+    ) {
+        SipResponse response = SipResponses.createResponse(request, status, reason);
+        return new SipResponse(
+                response.version(),
+                response.statusCode(),
+                response.reasonPhrase(),
+                response.headers().withReplaced(name, value),
+                response.body()
+        );
+    }
+
+    private static SessionTimerNegotiator.NegotiatedSessionTimer negotiated(int intervalSeconds) {
+        return new SessionTimerNegotiator.NegotiatedSessionTimer(
+                intervalSeconds,
+                SessionRefresher.UAC,
+                SessionRefreshMethod.UPDATE
+        );
+    }
+
+    private static DialogTransactionBridge bridge(
+            TestRig rig,
+            org.loomsip.transaction.noninvite.NonInviteServerListener serverListener
+    ) {
+        return new DialogTransactionBridge(
+                rig.manager,
+                (transaction, response, context) -> {
+                },
+                (transaction, request, context) -> {
+                },
+                (transaction, response, context) -> {
+                },
+                serverListener
+        );
+    }
+
+    private static TransportContext context(TestRig rig) {
+        return new TransportContext(
+                TransportProtocol.UDP,
+                rig.remote.address(),
+                rig.remote.address()
+        );
+    }
+
     private static <T> T await(CompletionStage<T> stage) {
         try {
             return stage.toCompletableFuture().join();
@@ -524,6 +760,7 @@ class DialogInDialogRequestTest {
 
         private final List<SipRequest> invites = new ArrayList<>();
         private final List<SipRequest> nonInvites = new ArrayList<>();
+        private final List<ClientTransactionHandle> nonInviteHandles = new ArrayList<>();
         private final List<TransportEndpoint> targets = new ArrayList<>();
 
         @Override
@@ -557,10 +794,15 @@ class DialogInDialogRequestTest {
         public ClientTransactionHandle sendNonInvite(SipRequest request, TransportEndpoint target) {
             nonInvites.add(request);
             targets.add(target);
-            return new ClientTransactionHandle() {
+            ClientTransactionHandle handle = new ClientTransactionHandle() {
                 @Override
                 public TransactionKey key() {
                     return null;
+                }
+
+                @Override
+                public SipRequest originalRequest() {
+                    return request;
                 }
 
                 @Override
@@ -573,6 +815,33 @@ class DialogInDialogRequestTest {
                     return CompletableFuture.completedFuture(null);
                 }
             };
+            nonInviteHandles.add(handle);
+            return handle;
+        }
+    }
+
+    private static final class RecordingServerTransaction implements ServerTransactionHandle {
+
+        private final AtomicReference<SipResponse> response = new AtomicReference<>();
+
+        @Override
+        public TransactionKey key() {
+            return null;
+        }
+
+        @Override
+        public NonInviteServerState state() {
+            return NonInviteServerState.TRYING;
+        }
+
+        @Override
+        public void sendResponse(SipResponse response) {
+            this.response.set(response);
+        }
+
+        @Override
+        public CompletionStage<Void> terminated() {
+            return CompletableFuture.completedFuture(null);
         }
     }
 }

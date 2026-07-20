@@ -1,5 +1,6 @@
 package org.loomsip.transaction.noninvite;
 
+import org.loomsip.message.SipRequest;
 import org.loomsip.transaction.TransactionKey;
 
 import java.util.concurrent.CompletionStage;
@@ -15,6 +16,13 @@ public interface ClientTransactionHandle {
      * @return client transaction key
      */
     TransactionKey key();
+
+    /**
+     * Returns the immutable request that created this transaction.
+     *
+     * @return original Non-INVITE request
+     */
+    SipRequest originalRequest();
 
     /**
      * Returns the latest externally visible state.

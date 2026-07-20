@@ -12,6 +12,10 @@ public enum DialogTerminationReason {
     LOCAL_BYE,
     /** A remote BYE passed Dialog identity and CSeq validation. */
     REMOTE_BYE,
+    /** Session refresher missed the negotiated RFC 4028 deadline. */
+    SESSION_EXPIRED,
+    /** An automatic RFC 4028 refresh transaction failed. */
+    SESSION_REFRESH_FAILED,
     /** Owning Dialog manager is closing. */
     MANAGER_SHUTDOWN,
     /** Mailbox or execution infrastructure failed. */

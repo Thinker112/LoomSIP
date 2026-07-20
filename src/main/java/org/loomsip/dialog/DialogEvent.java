@@ -14,6 +14,10 @@ sealed interface DialogEvent permits
         DialogUasExchangeReleased,
         DialogAckReceived,
         DialogTimerExpired,
+        DialogSessionTimerSignalled,
+        DialogSessionTimerConfigured,
+        DialogSessionRefreshRetryRequested,
+        DialogSessionRefreshFailed,
         DialogReliabilityTransportFailed,
         DialogShutdown {
 }

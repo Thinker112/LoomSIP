@@ -10,6 +10,9 @@ import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipResponse;
 import org.loomsip.message.header.CSeqHeaderValue;
 import org.loomsip.message.header.RAckHeaderValue;
+import org.loomsip.message.header.SessionExpiresHeaderValue;
+import org.loomsip.message.header.SessionRefresher;
+import org.loomsip.message.header.SipExtensionSupport;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
 import org.loomsip.transaction.TransportReliability;
@@ -59,6 +62,7 @@ public final class SipDialog implements DialogHandle {
     private final DialogRuntime runtime;
     private final DialogRequestRuntime requestRuntime;
     private final DialogTimerManager timers;
+    private final SessionTimerManager sessionTimer;
     private final CompletableFuture<Void> terminated = new CompletableFuture<>();
     private final Map<DialogInviteKey, DialogAckTransmission> uacAcks = new HashMap<>();
     private final Map<DialogInviteKey, UasSuccessExchange> uasSuccesses = new HashMap<>();
@@ -66,6 +70,8 @@ public final class SipDialog implements DialogHandle {
 
     private volatile DialogSnapshot snapshot;
     private boolean terminationStarted;
+    private long sessionRetryGeneration;
+    private SessionRefreshAttempt sessionRefreshAttempt;
 
     SipDialog(
             DialogSnapshot initialSnapshot,
@@ -122,6 +128,12 @@ public final class SipDialog implements DialogHandle {
                         this::submitTimerEvent,
                         this::handleInfrastructureFailure
                 );
+        sessionTimer = runtime == null ? null : new SessionTimerManager(
+                runtime.scheduler(),
+                dialogExecutor,
+                this::submitSessionTimerSignal,
+                config.mailboxCapacity()
+        );
     }
 
     @Override
@@ -225,6 +237,37 @@ public final class SipDialog implements DialogHandle {
             SipBody body
     ) {
         return sendRequest(SipMethod.UPDATE, additionalHeaders, body);
+    }
+
+    CompletionStage<DialogSessionState> configureSessionTimer(
+            SessionTimerNegotiator.NegotiatedSessionTimer negotiated,
+            boolean localRefresher
+    ) {
+        if (sessionTimer == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Dialog session runtime is not configured"));
+        }
+        CompletableFuture<DialogSessionState> result = new CompletableFuture<>();
+        sessionTimer.configure(negotiated, localRefresher).whenComplete((state, failure) -> {
+            DialogSessionTimerConfigured configured = failure == null
+                    ? new DialogSessionTimerConfigured(state, null, result)
+                    : new DialogSessionTimerConfigured(null, unwrapCompletionFailure(failure), result);
+            submit(configured, result);
+        });
+        return result.minimalCompletionStage();
+    }
+
+    CompletionStage<Boolean> retrySessionRefresh(long sequenceNumber, int minimumSeconds) {
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        submit(new DialogSessionRefreshRetryRequested(sequenceNumber, minimumSeconds, result), result);
+        return result.minimalCompletionStage();
+    }
+
+    void failSessionRefresh(long sequenceNumber, Throwable cause) {
+        try {
+            mailbox.submit(new DialogSessionRefreshFailed(sequenceNumber, cause));
+        } catch (MailboxClosedException ignored) {
+            // A late transaction callback cannot revive a terminated Dialog.
+        }
     }
 
     CompletionStage<Void> transitionTo(DialogState target, DialogTerminationReason reason) {
@@ -350,10 +393,138 @@ public final class SipDialog implements DialogHandle {
             handleAck(ack);
         } else if (event instanceof DialogTimerExpired expired) {
             handleTimer(expired);
+        } else if (event instanceof DialogSessionTimerSignalled signalled) {
+            handleSessionTimerSignal(signalled.signal());
+        } else if (event instanceof DialogSessionTimerConfigured configured) {
+            handleSessionTimerConfigured(configured);
+        } else if (event instanceof DialogSessionRefreshRetryRequested retry) {
+            handleSessionRefreshRetry(retry);
+        } else if (event instanceof DialogSessionRefreshFailed failure) {
+            handleSessionRefreshFailure(failure);
         } else if (event instanceof DialogReliabilityTransportFailed failure) {
             notifyTu(() -> listener.onReliabilityTransportFailure(this, failure.message(), failure.cause()));
         } else if (event instanceof DialogShutdown shutdown) {
             terminate(shutdown.reason());
+        }
+    }
+
+    private void handleSessionRefreshRetry(DialogSessionRefreshRetryRequested retry) {
+        DialogSessionState current = sessionTimer == null ? null : sessionTimer.state();
+        if (terminationStarted || current == null || sessionRefreshAttempt == null
+                || sessionRefreshAttempt.generation() != current.generation()
+                || sessionRefreshAttempt.sequenceNumber() != retry.sequenceNumber()) {
+            retry.result().complete(false);
+            return;
+        }
+        if (sessionRetryGeneration == current.generation()) {
+            retry.result().complete(false);
+            return;
+        }
+        sessionRetryGeneration = current.generation();
+        int interval = Math.max(current.intervalSeconds(), retry.minimumSeconds());
+        SessionRefresher localRole = snapshot.role() == DialogRole.UAC
+                ? SessionRefresher.UAC
+                : SessionRefresher.UAS;
+        SipHeaders headers = SipHeaders.builder()
+                .add("Session-Expires", new SessionExpiresHeaderValue(
+                        interval,
+                        Optional.of(localRole)
+                ).wireValue())
+                .add("Min-SE", Integer.toString(retry.minimumSeconds()))
+                .add("Supported", "timer")
+                .build();
+        startSessionRefresh(current, headers, retry.result());
+    }
+
+    private void handleSessionTimerSignal(SessionTimerSignal signal) {
+        DialogSessionState current = sessionTimer == null ? null : sessionTimer.state();
+        if (terminationStarted || current == null || current.generation() != signal.state().generation()) {
+            return;
+        }
+        if (signal.action() == SessionTimerAction.EXPIRE) {
+            terminate(DialogTerminationReason.SESSION_EXPIRED);
+            return;
+        }
+        if (requestRuntime == null) {
+            terminate(DialogTerminationReason.SESSION_REFRESH_FAILED);
+            return;
+        }
+        if (sessionRefreshAttempt != null
+                && sessionRefreshAttempt.generation() == current.generation()) {
+            return;
+        }
+        SessionRefresher localRole = snapshot.role() == DialogRole.UAC
+                ? SessionRefresher.UAC
+                : SessionRefresher.UAS;
+        SipHeaders headers = SipHeaders.builder()
+                .add("Session-Expires", new SessionExpiresHeaderValue(
+                        current.intervalSeconds(),
+                        Optional.of(localRole)
+                ).wireValue())
+                .add("Supported", "timer")
+                .build();
+        startSessionRefresh(current, headers, null);
+    }
+
+    private void handleSessionTimerConfigured(DialogSessionTimerConfigured configured) {
+        if (configured.failure() != null) {
+            configured.result().completeExceptionally(configured.failure());
+            return;
+        }
+        sessionRefreshAttempt = null;
+        configured.result().complete(configured.state());
+    }
+
+    private void handleSessionRefreshFailure(DialogSessionRefreshFailed failure) {
+        if (terminationStarted || sessionRefreshAttempt == null
+                || sessionRefreshAttempt.sequenceNumber() != failure.sequenceNumber()) {
+            return;
+        }
+        notifyTu(() -> listener.onFailure(this, failure.cause()));
+        terminate(DialogTerminationReason.SESSION_REFRESH_FAILED);
+    }
+
+    private void startSessionRefresh(
+            DialogSessionState current,
+            SipHeaders headers,
+            CompletableFuture<Boolean> retryResult
+    ) {
+        try {
+            SipMethod method = current.refreshMethod().method();
+            DialogPreparedRequest prepared = prepareRequestNow(method, headers, SipBody.empty());
+            long sequenceNumber = SipHeaderValues.cseq(prepared.request().headers()).sequenceNumber();
+            sessionRefreshAttempt = new SessionRefreshAttempt(
+                    current.generation(),
+                    sequenceNumber,
+                    method
+            );
+            CompletionStage<?> dispatch = method == SipMethod.UPDATE
+                    ? requestRuntime.sendNonInvite(prepared)
+                    : requestRuntime.sendInvite(prepared);
+            dispatch.whenComplete((ignored, failure) -> {
+                if (failure != null) {
+                    failSessionRefresh(sequenceNumber, unwrapCompletionFailure(failure));
+                    if (retryResult != null) {
+                        retryResult.completeExceptionally(unwrapCompletionFailure(failure));
+                    }
+                } else if (retryResult != null) {
+                    retryResult.complete(true);
+                }
+            });
+        } catch (Throwable cause) {
+            if (retryResult != null) {
+                retryResult.completeExceptionally(cause);
+            }
+            notifyTu(() -> listener.onFailure(this, cause));
+            terminate(DialogTerminationReason.SESSION_REFRESH_FAILED);
+        }
+    }
+
+    private void submitSessionTimerSignal(SessionTimerSignal signal) {
+        try {
+            mailbox.submit(new DialogSessionTimerSignalled(signal));
+        } catch (MailboxClosedException ignored) {
+            // Dialog ended before timer delivery.
         }
     }
 
@@ -621,22 +792,34 @@ public final class SipDialog implements DialogHandle {
             return;
         }
         try {
-            long next = Math.incrementExact(snapshot.localCSeq());
-            DialogPreparedRequest prepared = DialogRequests.create(
-                    snapshot,
-                    new DialogRoutePlanner().plan(snapshot),
-                    requestRuntime.profile(),
+            event.result().complete(prepareRequestNow(
                     event.method(),
-                    next,
                     event.additionalHeaders(),
-                    event.body(),
-                    runtime.nextBranch()
-            );
-            updateSnapshot(snapshot.state(), next, snapshot.remoteCSeq(), snapshot.remoteTarget());
-            event.result().complete(prepared);
+                    event.body()
+            ));
         } catch (Throwable cause) {
             event.result().completeExceptionally(cause);
         }
+    }
+
+    private DialogPreparedRequest prepareRequestNow(
+            SipMethod method,
+            SipHeaders additionalHeaders,
+            SipBody body
+    ) throws SipHeaderValueException {
+        long next = Math.incrementExact(snapshot.localCSeq());
+        DialogPreparedRequest prepared = DialogRequests.create(
+                snapshot,
+                new DialogRoutePlanner().plan(snapshot),
+                requestRuntime.profile(),
+                method,
+                next,
+                additionalHeaders,
+                body,
+                runtime.nextBranch()
+        );
+        updateSnapshot(snapshot.state(), next, snapshot.remoteCSeq(), snapshot.remoteTarget());
+        return prepared;
     }
 
     private void handleInDialogRequest(DialogInDialogRequestReceived event) {
@@ -724,9 +907,13 @@ public final class SipDialog implements DialogHandle {
         if (timers != null) {
             timers.close();
         }
+        if (sessionTimer != null) {
+            sessionTimer.close();
+        }
         uacAcks.clear();
         uasSuccesses.clear();
         acknowledgedInvites.clear();
+        sessionRefreshAttempt = null;
         DialogState previous = snapshot.state();
         if (previous != DialogState.TERMINATED) {
             updateSnapshot(
@@ -850,5 +1037,12 @@ public final class SipDialog implements DialogHandle {
             this.reliability = reliability;
             this.retransmitInterval = retransmitInterval;
         }
+    }
+
+    private record SessionRefreshAttempt(
+            long generation,
+            long sequenceNumber,
+            SipMethod method
+    ) {
     }
 }

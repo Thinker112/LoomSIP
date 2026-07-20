@@ -12,7 +12,7 @@
 
 现有 Transaction 表示一次 SIP 请求尝试，Dialog 则拥有跨 Transaction 的 Call-ID、Tag、CSeq、Route Set 和 Remote Target。Digest 认证可能在一个逻辑请求中依次创建未认证和已认证的多个 Transaction；PRACK、UPDATE 和 Session Timer 又需要复用 Dialog 的顺序化状态。因此，本阶段不能把认证重试直接塞入现有 Transaction 状态机，也不能让认证组件绕过 Dialog Mailbox 修改 CSeq。
 
-实施状态：6A～6D 已完成（2026-07-20），6E～6G 待执行。
+实施状态：6A～6E 已完成（2026-07-20），6F～6G 待执行。
 
 ## 2. RFC 范围与必要性
 
@@ -467,15 +467,21 @@ NIST PRACK -> ReliableProvisionalManager -> RAck match -> Dialog Bridge -> TU
 
 ## 10. 6E：UPDATE / Session Timer
 
-实施状态：进行中。6E-A～6E-B 已完成 UPDATE、RFC 4028 Header 与协商/422 决策；Dialog timer generation、自动刷新和 422 retry 请求重建待继续。
+实施状态：已完成（2026-07-20）。
 
-### 10.0 已完成基础
+### 10.0 已完成实现
 
 - `SessionExpiresHeaderValue`、`MinSeHeaderValue`、`SessionRefresher` 与 `SipHeaderValues.sessionExpires/minSe(...)`：解析和渲染 RFC 4028 基础 Header。
 - `SessionTimerPolicy`、`SessionTimerNegotiator`、`SessionRefreshMethod`：执行 Min-SE 校验、默认 UAC refresher 和刷新方法选择；低于最小值时返回携带 Min-SE 数值的 `SessionIntervalTooSmallException`，供 UAS 生成 422、UAC 重建新 CSeq 请求。
+- `SessionTimerManager`、`DialogSessionState`、`SessionTimerAction`：使用 Mailbox 和 generation 管理替换式 deadline；本地 refresher 在半 interval 触发 REFRESH，远端 refresher 在完整 interval 触发 EXPIRE，过期回调不会影响较新的协商状态。
 - `DialogHandle.sendUpdate(...)`：UPDATE 使用独立 Non-INVITE Transaction，在 Early/Confirmed Dialog 中均由 Dialog Mailbox 分配新 CSeq、Via、Route Set 与 Remote Target。
 - UPDATE 被纳入 target-refresh Method：入站 UPDATE 带一个非 wildcard Contact 时更新 Remote Target，不改变 Dialog 的 Early/Confirmed 状态。
-- `SessionTimerHeaderValuesTest`、`SessionTimerNegotiatorTest`、`DialogInDialogRequestTest`：覆盖 Header 解析、协商/422、Early Dialog UPDATE、CSeq 与 target-refresh。
+- 本地 refresher 在半 interval 创建策略指定的 UPDATE 或 re-INVITE；远端 refresher 在完整 interval 未刷新时终止 Dialog。
+- 自动刷新 attempt 由 Dialog Mailbox 以 generation、CSeq 和 Method 唯一关联；同一 generation 不并行创建多个刷新工作流。
+- UAC 422 重试由 Dialog Mailbox 分配新 CSeq 和 branch，每个 generation 最多一次；第二次 422、非 2xx、Transaction 超时、传输失败或请求创建失败都会终止 Dialog。
+- UAS 在收到过小 UPDATE interval 时于 TU 回调前返回 `422 + Min-SE`；合法协商仅在 TU 发送 2xx 时安装 Timer，并保证 2xx 携带协商后的 `Session-Expires`。
+- `ClientTransactionHandle.originalRequest()` 让 NICT 回调使用原请求 CSeq 精确关联刷新 attempt；新协商后的旧 Transaction 迟到回调不会影响新 generation。
+- `SessionTimerHeaderValuesTest`、`SessionTimerNegotiatorTest`、`SessionTimerManagerTest`、`DialogInDialogRequestTest`：覆盖 Header 解析、协商/422、generation、虚拟时间刷新/到期、Early Dialog UPDATE、CSeq、target-refresh 和 Transaction 失败闭环。
 
 ### 10.1 UPDATE
 
@@ -490,33 +496,48 @@ UPDATE 依据 RFC 3311：
 
 ### 10.2 Session Timer
 
-Session Timer 依据 RFC 4028，状态归 Dialog Mailbox 所有：
+Session Timer 依据 RFC 4028。Timer controller 的 deadline/generation 由自己的 Mailbox 串行化；会改变 Dialog 生命周期、CSeq 和自动刷新 attempt 的协调状态只由 Dialog Mailbox 修改：
 
 ```text
 INVITE / UPDATE negotiation
            |
            v
-Dialog Session State
+Session Timer Mailbox
   - interval
-  - refresher role
+  - local/remote refresher
   - refresh method
   - generation
            |
+           +---- schedule ----> SipScheduler
+           |                         |
+           <--- REFRESH / EXPIRE ----+
+           |
            v
-virtual refresh / expiry timer
+      Dialog Mailbox
+  - local CSeq allocation
+  - one active refresh attempt
+  - retry / terminate decision
+           |
+           v
+   ICT / NICT new Transaction
+           |
+           v
+2xx / 422 / timeout / transport failure
+           |
+           +---- Dialog ID + CSeq ----> Dialog Mailbox
 ```
 
-需要处理：
+已实现：
 
 - Session-Expires、Min-SE 和 refresher 参数。
 - UAC/UAS refresher 角色协商。
 - 422 Session Interval Too Small 及新 CSeq/new Transaction 重试。
 - 使用 re-INVITE 或 UPDATE 刷新，由策略选择。
 - 每次刷新替换 Timer generation，拒绝过期回调。
-- 刷新失败或 Session 过期时终止 Dialog，并按策略发送 BYE。
+- 刷新失败或 Session 过期时终止 Dialog；当前核心策略不自动发送 BYE。
 - Stack/Dialog 关闭时取消所有 Session Timer。
 
-422 重试与认证重试都通过 Client Request Exchange 建立新 Transaction，但 CSeq 仍由 Dialog Mailbox 分配。
+422 重试建立新的 Client Transaction；认证重试继续通过 Client Request Exchange。两者的 in-dialog CSeq 都由 Dialog Mailbox 分配。
 
 ## 11. 6F：INFO 与通用扩展分派
 

@@ -315,6 +315,26 @@ public final class DialogManager implements AutoCloseable {
         return requireDialog(id).updateRemoteTarget(remoteTarget);
     }
 
+    CompletionStage<DialogSessionState> configureSessionTimer(
+            DialogId id,
+            SessionTimerNegotiator.NegotiatedSessionTimer negotiated,
+            boolean localRefresher
+    ) {
+        return requireDialog(id).configureSessionTimer(negotiated, localRefresher);
+    }
+
+    CompletionStage<Boolean> retrySessionRefresh(
+            DialogId id,
+            long sequenceNumber,
+            int minimumSeconds
+    ) {
+        return requireDialog(id).retrySessionRefresh(sequenceNumber, minimumSeconds);
+    }
+
+    void failSessionRefresh(DialogId id, long sequenceNumber, Throwable cause) {
+        repository.find(id).ifPresent(dialog -> dialog.failSessionRefresh(sequenceNumber, cause));
+    }
+
     /**
      * Atomically allocates the next Local CSeq on the Dialog Mailbox.
      *

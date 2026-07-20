@@ -14,6 +14,8 @@ import org.loomsip.message.header.RecordRouteHeaderValue;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
 import org.loomsip.message.header.SipExtensionSupport;
+import org.loomsip.message.header.SessionExpiresHeaderValue;
+import org.loomsip.message.header.SessionRefresher;
 import org.loomsip.transaction.TransportReliability;
 import org.loomsip.transaction.invite.InviteClientHandle;
 import org.loomsip.transaction.invite.InviteClientListener;
@@ -36,7 +38,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Ordered bridge from INVITE transaction callbacks to Dialog lifecycle state.
+ * Ordered bridge from INVITE and Non-INVITE transaction callbacks to Dialog state.
  *
  * <p>The bridge exposes separate client and server listener adapters. The
  * application listeners remain outside Dialog Mailboxes, while every state
@@ -57,6 +59,16 @@ import java.util.concurrent.ConcurrentHashMap;
  *                                                               |
  *                                                               v
  *                                                     IST Mailbox / Transport
+ *
+ * NICT/ICT final response, timeout, or transport failure
+ *                         |
+ *                         v
+ *              Session refresh correlation
+ *               (Dialog ID + CSeq + generation)
+ *                         |
+ *                         v
+ *                  Dialog Mailbox
+ *             retry / replace timer / terminate
  * }</pre>
  */
 public final class DialogTransactionBridge {
@@ -307,6 +319,79 @@ public final class DialogTransactionBridge {
         return dialog;
     }
 
+    private void configureSessionTimer(DialogHandle dialog, SipResponse response)
+            throws SipHeaderValueException {
+        if (response.statusCode() < 200
+                || response.statusCode() >= 300
+                || !response.headers().contains("Session-Expires")) {
+            return;
+        }
+        SessionExpiresHeaderValue expires = SipHeaderValues.sessionExpires(response.headers());
+        SessionTimerNegotiator.NegotiatedSessionTimer negotiated =
+                new SessionTimerNegotiator().negotiate(expires, SessionTimerPolicy.DEFAULT);
+        SessionRefresher refresher = negotiated.refresher();
+        boolean localRefresher = dialog.snapshot().role() == DialogRole.UAC
+                ? refresher == SessionRefresher.UAC
+                : refresher == SessionRefresher.UAS;
+        await(dialogs.configureSessionTimer(dialog.id(), negotiated, localRefresher));
+    }
+
+    private void handleSessionRefreshFinal(SipRequest request, SipResponse response)
+            throws SipHeaderValueException {
+        if (!isSessionTimerRequest(request) || response.statusCode() < 200) {
+            return;
+        }
+        DialogId id = DialogId.from(response.headers(), DialogRole.UAC);
+        long sequenceNumber = SipHeaderValues.cseq(request.headers()).sequenceNumber();
+        if (response.statusCode() == 422 && response.headers().contains("Min-SE")) {
+            boolean retried = awaitValue(dialogs.retrySessionRefresh(
+                    id,
+                    sequenceNumber,
+                    SipHeaderValues.minSe(response.headers()).intervalSeconds()
+            ));
+            if (!retried) {
+                dialogs.failSessionRefresh(
+                        id,
+                        sequenceNumber,
+                        new IllegalStateException("Session Timer 422 retry limit reached")
+                );
+            }
+            return;
+        }
+        if (response.statusCode() >= 300 || !response.headers().contains("Session-Expires")) {
+            dialogs.failSessionRefresh(
+                    id,
+                    sequenceNumber,
+                    new IllegalStateException("Session refresh failed with SIP " + response.statusCode())
+            );
+        }
+    }
+
+    private void failSessionRefresh(SipRequest request, Throwable cause) {
+        if (!isSessionTimerRequest(request)) {
+            return;
+        }
+        try {
+            DialogId id = DialogId.from(request.headers(), DialogRole.UAC);
+            long sequenceNumber = SipHeaderValues.cseq(request.headers()).sequenceNumber();
+            dialogs.failSessionRefresh(id, sequenceNumber, cause);
+        } catch (Throwable bridgeFailure) {
+            cause.addSuppressed(bridgeFailure);
+        }
+    }
+
+    private static boolean isSessionTimerRequest(SipRequest request) {
+        if (!request.headers().contains("Session-Expires")
+                || (request.method() != SipMethod.INVITE && request.method() != SipMethod.UPDATE)) {
+            return false;
+        }
+        try {
+            return SipHeaderValues.toTag(request.headers()).isPresent();
+        } catch (SipHeaderValueException ignored) {
+            return false;
+        }
+    }
+
     private DialogSnapshot uacSnapshot(
             SipRequest invite,
             SipResponse response,
@@ -528,6 +613,10 @@ public final class DialogTransactionBridge {
                         transaction.originalRequest(),
                         response
                 );
+                if (dialog.isPresent()) {
+                    configureSessionTimer(dialog.orElseThrow(), response);
+                }
+                handleSessionRefreshFinal(transaction.originalRequest(), response);
                 if (response.statusCode() >= 200
                         && response.statusCode() < 300
                         && dialog.isPresent()
@@ -579,6 +668,7 @@ public final class DialogTransactionBridge {
                             }));
                 }
             } catch (Throwable cause) {
+                failSessionRefresh(transaction.originalRequest(), cause);
                 reportClientFailure("failed to bridge INVITE client response", cause);
             }
             clientDelegate.onResponse(transaction, response, context);
@@ -586,11 +676,16 @@ public final class DialogTransactionBridge {
 
         @Override
         public void onTimeout(InviteClientHandle transaction, SipTimer timer) {
+            failSessionRefresh(
+                    transaction.originalRequest(),
+                    new IllegalStateException("Session refresh timed out on Timer " + timer)
+            );
             clientDelegate.onTimeout(transaction, timer);
         }
 
         @Override
         public void onTransportFailure(InviteClientHandle transaction, Throwable cause) {
+            failSessionRefresh(transaction.originalRequest(), cause);
             clientDelegate.onTransportFailure(transaction, cause);
         }
 
@@ -745,16 +840,36 @@ public final class DialogTransactionBridge {
                 SipResponse response,
                 TransportContext context
         ) {
+            try {
+                if (response.statusCode() >= 200
+                        && response.statusCode() < 300
+                        && response.headers().contains("Session-Expires")) {
+                    DialogId id = DialogId.from(response.headers(), DialogRole.UAC);
+                    Optional<DialogHandle> dialog = dialogs.find(id);
+                    if (dialog.isPresent()) {
+                        configureSessionTimer(dialog.orElseThrow(), response);
+                    }
+                }
+                handleSessionRefreshFinal(transaction.originalRequest(), response);
+            } catch (Throwable cause) {
+                failSessionRefresh(transaction.originalRequest(), cause);
+                reportClientFailure("failed to configure Session Timer from Non-INVITE response", cause);
+            }
             nonInviteClientDelegate.onResponse(transaction, response, context);
         }
 
         @Override
         public void onTimeout(ClientTransactionHandle transaction, SipTimer timer) {
+            failSessionRefresh(
+                    transaction.originalRequest(),
+                    new IllegalStateException("Session refresh timed out on Timer " + timer)
+            );
             nonInviteClientDelegate.onTimeout(transaction, timer);
         }
 
         @Override
         public void onTransportFailure(ClientTransactionHandle transaction, Throwable cause) {
+            failSessionRefresh(transaction.originalRequest(), cause);
             nonInviteClientDelegate.onTransportFailure(transaction, cause);
         }
 
@@ -777,7 +892,34 @@ public final class DialogTransactionBridge {
                 SipRequest request,
                 TransportContext context
         ) {
+            SessionTimerNegotiator.NegotiatedSessionTimer sessionNegotiation = null;
             try {
+                if (SipMethod.UPDATE.equals(request.method())
+                        && request.headers().contains("Session-Expires")) {
+                    try {
+                        sessionNegotiation = new SessionTimerNegotiator().negotiate(
+                                SipHeaderValues.sessionExpires(request.headers()),
+                                SessionTimerPolicy.DEFAULT
+                        );
+                    } catch (SessionIntervalTooSmallException tooSmall) {
+                        SipResponse base = SipResponses.createResponse(
+                                request,
+                                422,
+                                "Session Interval Too Small",
+                                SipHeaderValues.toTag(request.headers()).orElse("loomsip")
+                        );
+                        transaction.sendResponse(new SipResponse(
+                                base.version(),
+                                base.statusCode(),
+                                base.reasonPhrase(),
+                                base.headers().toBuilder()
+                                        .add("Min-SE", Integer.toString(tooSmall.minimumSeconds()))
+                                        .build(),
+                                base.body()
+                        ));
+                        return;
+                    }
+                }
                 if (SipMethod.PRACK.equals(request.method()) && reliableProvisionals != null) {
                     DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
                     PrackValidation validation = awaitValue(reliableProvisionals.acceptPrack(id, request));
@@ -800,7 +942,10 @@ public final class DialogTransactionBridge {
                 reportServerFailure("failed to route in-Dialog Non-INVITE request", cause);
                 return;
             }
-            nonInviteServerDelegate.onRequest(transaction, request, context);
+            ServerTransactionHandle selected = sessionNegotiation == null
+                    ? transaction
+                    : new SessionTimerServerHandle(transaction, request, sessionNegotiation);
+            nonInviteServerDelegate.onRequest(selected, request, context);
         }
 
         @Override
@@ -816,6 +961,69 @@ public final class DialogTransactionBridge {
         @Override
         public void onLayerError(Throwable cause) {
             nonInviteServerDelegate.onLayerError(cause);
+        }
+    }
+
+    private final class SessionTimerServerHandle implements ServerTransactionHandle {
+
+        private final ServerTransactionHandle delegate;
+        private final SipRequest request;
+        private final SessionTimerNegotiator.NegotiatedSessionTimer negotiated;
+
+        private SessionTimerServerHandle(
+                ServerTransactionHandle delegate,
+                SipRequest request,
+                SessionTimerNegotiator.NegotiatedSessionTimer negotiated
+        ) {
+            this.delegate = delegate;
+            this.request = request;
+            this.negotiated = negotiated;
+        }
+
+        @Override
+        public org.loomsip.transaction.TransactionKey key() {
+            return delegate.key();
+        }
+
+        @Override
+        public org.loomsip.transaction.noninvite.NonInviteServerState state() {
+            return delegate.state();
+        }
+
+        @Override
+        public void sendResponse(SipResponse response) {
+            SipResponse selected = response;
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                try {
+                    selected = new SipResponse(
+                            response.version(),
+                            response.statusCode(),
+                            response.reasonPhrase(),
+                            response.headers().withReplaced(
+                                    "Session-Expires",
+                                    new SessionExpiresHeaderValue(
+                                            negotiated.intervalSeconds(),
+                                            Optional.of(negotiated.refresher())
+                                    ).wireValue()
+                            ),
+                            response.body()
+                    );
+                    DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
+                    await(dialogs.configureSessionTimer(
+                            id,
+                            negotiated,
+                            negotiated.refresher() == SessionRefresher.UAS
+                    ));
+                } catch (Throwable cause) {
+                    reportServerFailure("failed to configure UAS Session Timer", cause);
+                }
+            }
+            delegate.sendResponse(selected);
+        }
+
+        @Override
+        public CompletionStage<Void> terminated() {
+            return delegate.terminated();
         }
     }
 
@@ -877,7 +1085,10 @@ public final class DialogTransactionBridge {
                         ));
                         retransmit.set(selected);
                     }
-                    processServerResponse(this, selected);
+                    Optional<DialogHandle> responseDialog = processServerResponse(this, selected);
+                    if (responseDialog.isPresent()) {
+                        configureSessionTimer(responseDialog.orElseThrow(), selected);
+                    }
                     delegate.sendResponse(selected);
                     if (reliableProvisionals != null
                             && selected.statusCode() >= 200

@@ -101,6 +101,11 @@ final class NonInviteClientTransaction extends AbstractNonInviteTransaction
     }
 
     @Override
+    public SipRequest originalRequest() {
+        return request;
+    }
+
+    @Override
     public CompletionStage<Void> terminated() {
         return terminationStage();
     }
