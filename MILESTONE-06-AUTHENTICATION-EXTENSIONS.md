@@ -467,14 +467,15 @@ NIST PRACK -> ReliableProvisionalManager -> RAck match -> Dialog Bridge -> TU
 
 ## 10. 6E：UPDATE / Session Timer
 
-实施状态：进行中。6E-A 已完成 UPDATE 与 RFC 4028 Header 基础；Session Timer 协商、timer generation、刷新和 422 retry 待继续。
+实施状态：进行中。6E-A～6E-B 已完成 UPDATE、RFC 4028 Header 与协商/422 决策；Dialog timer generation、自动刷新和 422 retry 请求重建待继续。
 
 ### 10.0 已完成基础
 
 - `SessionExpiresHeaderValue`、`MinSeHeaderValue`、`SessionRefresher` 与 `SipHeaderValues.sessionExpires/minSe(...)`：解析和渲染 RFC 4028 基础 Header。
+- `SessionTimerPolicy`、`SessionTimerNegotiator`、`SessionRefreshMethod`：执行 Min-SE 校验、默认 UAC refresher 和刷新方法选择；低于最小值时返回携带 Min-SE 数值的 `SessionIntervalTooSmallException`，供 UAS 生成 422、UAC 重建新 CSeq 请求。
 - `DialogHandle.sendUpdate(...)`：UPDATE 使用独立 Non-INVITE Transaction，在 Early/Confirmed Dialog 中均由 Dialog Mailbox 分配新 CSeq、Via、Route Set 与 Remote Target。
 - UPDATE 被纳入 target-refresh Method：入站 UPDATE 带一个非 wildcard Contact 时更新 Remote Target，不改变 Dialog 的 Early/Confirmed 状态。
-- `SessionTimerHeaderValuesTest`、`DialogInDialogRequestTest`：覆盖 Header 解析、Early Dialog UPDATE、CSeq 与 target-refresh。
+- `SessionTimerHeaderValuesTest`、`SessionTimerNegotiatorTest`、`DialogInDialogRequestTest`：覆盖 Header 解析、协商/422、Early Dialog UPDATE、CSeq 与 target-refresh。
 
 ### 10.1 UPDATE
 
