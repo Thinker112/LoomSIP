@@ -12,7 +12,7 @@
 
 现有 Transaction 表示一次 SIP 请求尝试，Dialog 则拥有跨 Transaction 的 Call-ID、Tag、CSeq、Route Set 和 Remote Target。Digest 认证可能在一个逻辑请求中依次创建未认证和已认证的多个 Transaction；PRACK、UPDATE 和 Session Timer 又需要复用 Dialog 的顺序化状态。因此，本阶段不能把认证重试直接塞入现有 Transaction 状态机，也不能让认证组件绕过 Dialog Mailbox 修改 CSeq。
 
-实施状态：6A～6B 已完成（2026-07-20），6C～6G 待执行。
+实施状态：6A～6C 已完成（2026-07-20），6D～6G 待执行。
 
 ## 2. RFC 范围与必要性
 
@@ -313,6 +313,8 @@ Provider 可以在虚拟线程上阻塞访问安全存储，但不能运行在 N
 
 ## 8. 6C：UAS Digest Authentication
 
+实施状态：已完成（2026-07-20）。
+
 ### 8.1 服务端认证位置
 
 ```text
@@ -331,7 +333,7 @@ missing/invalid   authenticated
 
 当前 LoomSIP 尚未实现 Proxy，因此本阶段服务端 Gate 只生成 401。UAC 仍支持 407，以便通过外部 SIP Proxy 互操作；本地 407 生成留到 Proxy 组件阶段。
 
-### 8.2 建议组件
+### 8.2 已实现组件
 
 ```text
 ServerAuthenticationGate
@@ -343,14 +345,14 @@ DigestVerificationResult
 DigestVerifier
 ```
 
-UAS Credential Repository 应支持按 realm、username 和 algorithm 返回预计算 HA1，避免要求服务端保存明文密码。
+UAS Credential Repository 按 realm、username 和 algorithm 返回预计算 HA1，避免要求服务端保存明文密码。
 
 ### 8.3 Nonce 和重放保护
 
 Nonce Manager 要求：
 
 - 使用 `SecureRandom` 或带完整性保护的服务器 Nonce。
-- 配置有效期、最大活动 Nonce 数和单用户并发限制。
+- 配置有效期、最大活动 Nonce 数和每个 Nonce 的 username/cnonce 重放状态上限。
 - 过期但结构合法的 Nonce 返回 `stale=true`。
 - 原子校验 `nonce-count`，拒绝重复或倒退的 nc。
 - 将 realm、algorithm 和必要的服务端身份绑定到 Nonce。
@@ -358,6 +360,38 @@ Nonce Manager 要求：
 - Stack 关闭时清理 Nonce 和重放状态。
 
 认证失败响应不能暴露用户是否存在、密码来源或摘要中间值。
+
+### 8.4 实现边界与装配
+
+- `DigestAuthorizationParser`：解析 UAC 的单个 Authorization Digest Header，要求 username、realm、nonce、uri、response、qop=auth、nc 与 cnonce；不支持 auth-int。
+- `DigestCredentialRepository`：按 realm、username、algorithm 异步返回 `DigestCredentialRecord`。Record 只持有预计算 HA1，toString 不输出 HA1。
+- `DigestNonceManager`：使用 `SecureRandom` 生成 256-bit nonce，绑定 realm、算法与 charset；以容量上限管理活动 nonce，并在验证成功后原子接收严格递增的 username/cnonce nc。
+- `DigestVerifier`：验证 Authorization 与 Request-URI、凭据记录、Nonce 绑定，并通过 `MessageDigest.isEqual` 常量时间比较响应摘要。
+- `ServerAuthenticationGate`：缺少、格式错误、未知用户、摘要不匹配或重放时生成通用 401；仅过期的已知 nonce 设置 stale=true。Credential Repository 基础设施失败时发送通用 500，并通过下游 onLayerError 报告安全错误。
+- `inviteListener(...)`、`nonInviteListener(...)`：将 Gate 包装在 `DialogTransactionBridge.serverListener()` / `nonInviteServerListener()` 之前，认证成功才进入 Dialog 和 TU；异步查询完成后通过指定的虚拟线程 callback executor 继续处理。
+
+建议装配顺序：
+
+```text
+InviteTransactionManager
+        |
+        v
+ServerAuthenticationGate.inviteListener(...)
+        |
+        v
+DialogTransactionBridge.serverListener()
+        |
+        v
+TU
+```
+
+`DigestNonceManager` 由组装层显式关闭，以清理全部 Nonce 与 replay state。当前没有统一 Stack API，因此 Gate 不自行拥有或关闭外部 Repository、executor、Dialog Bridge 或 Nonce Manager。
+
+已验证测试：
+
+- `DigestAuthorizationParserTest`：qop-auth 字段、quoted-pair 和非法 qop/缺失字段。
+- `DigestNonceManagerTest`：严格递增 nc、重复/非法 nc、过期 nonce 与关闭清理。
+- `ServerAuthenticationGateTest`：HA1 成功验证、重放、stale=true、认证 Gate 在下游 listener 前截断请求、通用失败响应。
 
 ## 9. 6D：PRACK / 100rel
 

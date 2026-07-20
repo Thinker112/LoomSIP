@@ -125,6 +125,26 @@ public final class DigestCalculator {
         }
     }
 
+    static String responseFromHa1(
+            DigestAlgorithm algorithm,
+            Charset charset,
+            String ha1,
+            String method,
+            String uri,
+            String nonce,
+            String nonceCount,
+            String cnonce,
+            DigestQop qop
+    ) {
+        Objects.requireNonNull(ha1, "ha1");
+        String ha2 = hash(algorithm, charset, method + ':' + uri);
+        return hash(
+                algorithm,
+                charset,
+                ha1 + ':' + nonce + ':' + nonceCount + ':' + cnonce + ':' + qop.wireName() + ':' + ha2
+        );
+    }
+
     private static String hash(DigestAlgorithm algorithm, Charset charset, String input) {
         byte[] encoded = input.getBytes(charset);
         try {
