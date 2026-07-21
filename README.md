@@ -166,7 +166,8 @@ org.loomsip
 3. **Dialog 与基本呼叫（已完成）**：Early/Confirmed Dialog，以及 INVITE、ACK、re-INVITE、BYE、CANCEL 完整流程。
 4. **可靠传输（已完成，5A～5F）**：TCP/TLS 分帧、连接复用、TLS 握手、统一协议选择、失败传播、连接级资源限制和真实完整呼叫验收。
 5. **认证与 SIP 扩展（6A～6G 已完成）**：请求尝试基础、UAC/UAS Digest、PRACK/100rel、UPDATE、Session Timer、INFO 完整分派，以及跨 Transport 场景、关闭和迟到事件收敛验收。
-6. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
+6. **订阅与事件框架（第七阶段）**：SUBSCRIBE/NOTIFY、Subscription Mailbox、Expires、事件分派和 REFER event package。
+7. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
 
 ## 文档
 
@@ -177,6 +178,7 @@ org.loomsip
 - [MILESTONE-04-DIALOG-LAYER.md](MILESTONE-04-DIALOG-LAYER.md)：Dialog、2xx ACK、re-INVITE、BYE 和基本呼叫设计。
 - [MILESTONE-05-RELIABLE-TRANSPORT.md](MILESTONE-05-RELIABLE-TRANSPORT.md)：TCP/TLS 分帧、连接复用、安全和资源限制方案。
 - [MILESTONE-06-AUTHENTICATION-EXTENSIONS.md](MILESTONE-06-AUTHENTICATION-EXTENSIONS.md)：Digest、请求重试、PRACK/100rel、UPDATE、Session Timer 和 INFO 方案。
+- [MILESTONE-07-SUBSCRIPTIONS.md](MILESTONE-07-SUBSCRIPTIONS.md)：SUBSCRIBE/NOTIFY、Subscription 状态机、Expires 和 REFER event package 方案。
 - [CONTRIBUTING.md](CONTRIBUTING.md)：开发约定与公共 API Javadoc 要求。
 
 ## 贡献约定

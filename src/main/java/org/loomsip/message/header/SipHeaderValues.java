@@ -249,6 +249,104 @@ public final class SipHeaderValues {
         }
     }
 
+    /** Parses one RFC 3265 Event header. */
+    public static EventHeaderValue event(SipHeaders headers) throws SipHeaderValueException {
+        return parseEvent(requiredSingleValue(headers, "Event"));
+    }
+
+    /** Parses all RFC 3265 Allow-Events fields as one ordered capability list. */
+    public static AllowEventsHeaderValue allowEvents(SipHeaders headers) throws SipHeaderValueException {
+        Objects.requireNonNull(headers, "headers");
+        List<EventHeaderValue> events = new ArrayList<>();
+        List<SipHeader> fields = headers.all("Allow-Events");
+        if (fields.isEmpty()) {
+            throw new SipHeaderValueException("missing Allow-Events header");
+        }
+        try {
+            for (SipHeader field : fields) {
+                for (String item : field.value().split(",", -1)) {
+                    events.add(new EventHeaderValue(item.strip(), Optional.empty()));
+                }
+            }
+            return new AllowEventsHeaderValue(events);
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Allow-Events header", exception);
+        }
+    }
+
+    /** Parses one non-negative Expires header. */
+    public static ExpiresHeaderValue expires(SipHeaders headers) throws SipHeaderValueException {
+        String value = requiredSingleValue(headers, "Expires").strip();
+        try {
+            if (!isAsciiDigits(value)) {
+                throw new NumberFormatException("non-ASCII Expires interval");
+            }
+            return new ExpiresHeaderValue(Integer.parseInt(value));
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Expires header", exception);
+        }
+    }
+
+    /** Parses one RFC 3265 Subscription-State header. */
+    public static SubscriptionStateHeaderValue subscriptionState(SipHeaders headers) throws SipHeaderValueException {
+        String value = requiredSingleValue(headers, "Subscription-State").strip();
+        String[] parts = value.split(";", -1);
+        try {
+            SubscriptionState state = SubscriptionState.parse(parts[0].strip());
+            Optional<String> reason = Optional.empty();
+            Optional<Integer> expires = Optional.empty();
+            Optional<Integer> retryAfter = Optional.empty();
+            for (int index = 1; index < parts.length; index++) {
+                String[] parameter = parts[index].strip().split("=", 2);
+                if (parameter.length != 2) {
+                    throw new IllegalArgumentException("invalid Subscription-State parameter");
+                }
+                String name = parameter[0].strip().toLowerCase(Locale.ROOT);
+                String parameterValue = parameter[1].strip();
+                switch (name) {
+                    case "reason" -> reason = unique(reason, HeaderSyntax.requireToken(parameterValue, "reason"), name);
+                    case "expires" -> expires = unique(expires, parseNonNegative(parameterValue, name), name);
+                    case "retry-after" -> retryAfter = unique(retryAfter, parseNonNegative(parameterValue, name), name);
+                    default -> throw new IllegalArgumentException("unsupported Subscription-State parameter: " + name);
+                }
+            }
+            return new SubscriptionStateHeaderValue(state, reason, expires, retryAfter);
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Subscription-State header", exception);
+        }
+    }
+
+    private static EventHeaderValue parseEvent(String rawValue) throws SipHeaderValueException {
+        String[] parts = rawValue.strip().split(";", -1);
+        try {
+            Optional<String> eventId = Optional.empty();
+            for (int index = 1; index < parts.length; index++) {
+                String[] parameter = parts[index].strip().split("=", 2);
+                if (parameter.length != 2 || !"id".equalsIgnoreCase(parameter[0].strip())) {
+                    throw new IllegalArgumentException("unsupported Event parameter");
+                }
+                eventId = unique(eventId, HeaderSyntax.requireToken(parameter[1].strip(), "Event id"), "id");
+            }
+            return new EventHeaderValue(parts[0].strip(), eventId);
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Event header", exception);
+        }
+    }
+
+    private static int parseNonNegative(String value, String name) {
+        if (!isAsciiDigits(value)) {
+            throw new IllegalArgumentException(name + " must contain ASCII digits");
+        }
+        return Integer.parseInt(value);
+    }
+
+    private static <T> Optional<T> unique(Optional<T> current, T value, String name) {
+        if (current.isPresent()) {
+            throw new IllegalArgumentException("duplicate " + name + " parameter");
+        }
+        return Optional.of(value);
+    }
+
     private static ViaHeaderValue parseVia(String value) throws SipHeaderValueException {
         String stripped = value.strip();
         int whitespace = firstWhitespace(stripped);
