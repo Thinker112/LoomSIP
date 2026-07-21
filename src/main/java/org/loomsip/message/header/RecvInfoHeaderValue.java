@@ -1,5 +1,7 @@
 package org.loomsip.message.header;
 
+import org.loomsip.message.SipHeaders;
+
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -42,5 +44,15 @@ public record RecvInfoHeaderValue(List<InfoPackageHeaderValue> packages) {
      */
     public String wireValue() {
         return packages.stream().map(InfoPackageHeaderValue::wireValue).collect(java.util.stream.Collectors.joining(", "));
+    }
+
+    /**
+     * Returns headers with this capability list as the single Recv-Info field.
+     *
+     * @param headers source headers
+     * @return copy with Recv-Info replaced by this capability list
+     */
+    public SipHeaders applyTo(SipHeaders headers) {
+        return Objects.requireNonNull(headers, "headers").withReplaced("Recv-Info", wireValue());
     }
 }

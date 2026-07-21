@@ -541,7 +541,7 @@ Session Timer Mailbox
 
 ## 11. 6F：INFO 与通用扩展分派
 
-实施状态：进行中。6F-A 已完成（2026-07-21）；6F-B～6F-D 待执行。6F 只实现 RFC 6086 INFO 的结构化分派，不引入 Subscription 生命周期。
+实施状态：已完成（2026-07-21）。6F 只实现 RFC 6086 INFO 的结构化分派，不引入 Subscription 生命周期。
 
 ### 11.1 现有基础与边界
 
@@ -575,27 +575,27 @@ Dialog Bridge -- Dialog Mailbox --> identity / CSeq validation
 - 已新增 `InfoPackageHeaderValue`：解析和渲染单个 RFC 6086 `Info-Package` token，并提供大小写不敏感的比较键。
 - 已新增 `RecvInfoHeaderValue`：解析和渲染一个或多个可广告的 INFO package token，保持 wire order，并拒绝空 token、非法分隔符和重复值。
 - 已在 `SipHeaderValues` 增加结构化访问入口；Header 名称继续遵从现有大小写不敏感模型。
-- 已增加不可变 `InfoRequest`、`InfoResponse` 和异步 `InfoHandler` 合约；Dispatcher 接入、TU callback 与高层 `sendInfo(...)` API 留到后续子阶段。
+- 已增加不可变 `InfoRequest`、`InfoResponse` 和异步 `InfoHandler` 合约；已由 Dispatcher 接入 TU callback，并提供高层 `sendInfo(...)` API。
 - 已验证：合法 token/列表 round-trip、空值/非法 token/重复 package 的确定性失败，以及 Header 大小写不敏感访问。
 
 #### 6F-B：入站 INFO Dispatcher
 
-- 引入线程安全的 `InfoDispatcher` 和按 `Info-Package` 注册的 `InfoHandler`。
-- 有 `Info-Package` 的请求按 package 分派；未注册 package 返回 `469 Bad Info Package`，并携带本端 `Recv-Info`。
-- 没有 `Info-Package` 的传统 INFO 保持现有通用 Non-INVITE TU callback，避免破坏既有互操作。
-- Handler 的完成在 TU/虚拟线程侧处理，响应仍通过 NIST handle 发送。
-- 验收：成功分派、未知 package 469、传统 INFO 回退、Handler 异常和 Dialog 终止后的行为。
+- 已引入线程安全的 `InfoDispatcher` 和按 `Info-Package` 注册的 `InfoHandler`；注册按规范化 package name 查找，能力广告按确定顺序输出。已开始的分派持有当时选定的 Handler，不受后续注销影响。
+- 有 `Info-Package` 的 in-dialog INFO 已按 package 分派；未注册 package 返回 `469 Bad Info Package`，并在存在注册能力时携带本端 `Recv-Info`。
+- 没有 `Info-Package` 的传统 INFO 保持现有通用 Non-INVITE TU callback，避免破坏既有互操作；带 package 但没有 Dialog To tag 的 INFO 返回 481。
+- Handler 的完成在 TU/虚拟线程侧处理，响应仍通过 NIST handle 发送；异常、空 completion 或响应构造失败转换为 500。
+- 已验证：成功分派、未知 package 469、Dialog 外 package INFO 481、Handler 异常 500、传统 INFO 回退和注册表并发语义。
 
 #### 6F-C：出站 INFO 与能力广告
 
-- 在 `DialogHandle` 增加 `sendInfo(...)` 便捷入口，复用现有 Dialog 请求创建，自动设置 `Info-Package` 与应用提供的 `Content-Type`/Body。
-- `Recv-Info` 能力广告使用显式 Header helper，不隐式修改每个 INVITE 或响应。
+- 已在 `DialogHandle` 增加 `sendInfo(...)` 便捷入口，复用现有 Dialog 请求创建，自动设置受管 `Info-Package` 与应用提供的 `Content-Type`/Body。
+- `RecvInfoHeaderValue.applyTo(...)` 提供显式能力广告 Header helper；不隐式修改每个 INVITE 或响应。
 - 出站 INFO 继续使用 Non-INVITE Transaction；响应观察沿用既有 Transaction listener，不在此阶段引入新的 Exchange。
-- 验收：CSeq、Route Set、Remote Target、Body 和 Header 的完整保留；Early Dialog 限制保持 RFC 6086/现有 Method policy 一致。
+- 已验证：CSeq、Route Set、Remote Target、Body 和 Header 的完整保留；Early Dialog 发送及调用者覆盖受管 `Info-Package` Header 都被拒绝。
 
 #### 6F-D：REFER 边界确认
 
-- 保持已存在的 REFER Method 常量和通用 Dialog 请求通路。
+- 已验证 REFER Method 常量和通用 Confirmed Dialog 请求通路；核心仅分配 CSeq、Via、Route Set 和 Remote Target，不解释 `Refer-To` 业务语义。
 - 不实现 `Refer-To`、`Refer-Sub`、NOTIFY、`Subscription-State` 或 refer event package。
 - 完整 REFER 与 SUBSCRIBE/NOTIFY 作为第七阶段，在 6G 验收完成后实现 Subscription Mailbox、Expires 定时器和状态机。
 

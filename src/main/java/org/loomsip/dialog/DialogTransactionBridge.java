@@ -1,5 +1,9 @@
 package org.loomsip.dialog;
 
+import org.loomsip.info.InfoDispatcher;
+import org.loomsip.info.InfoHandler;
+import org.loomsip.info.InfoRequest;
+import org.loomsip.info.InfoResponse;
 import org.loomsip.message.SipHeaders;
 import org.loomsip.message.SipBody;
 import org.loomsip.message.SipMethod;
@@ -10,7 +14,9 @@ import org.loomsip.message.SipUri;
 import org.loomsip.message.header.CSeqHeaderValue;
 import org.loomsip.message.header.ContactHeaderValue;
 import org.loomsip.message.header.DialogHeaderValues;
+import org.loomsip.message.header.InfoPackageHeaderValue;
 import org.loomsip.message.header.RecordRouteHeaderValue;
+import org.loomsip.message.header.RecvInfoHeaderValue;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
 import org.loomsip.message.header.SipExtensionSupport;
@@ -79,6 +85,7 @@ public final class DialogTransactionBridge {
     private final NonInviteClientListener nonInviteClientDelegate;
     private final NonInviteServerListener nonInviteServerDelegate;
     private final ReliableProvisionalManager reliableProvisionals;
+    private final InfoDispatcher infoDispatcher;
     private final DialogRoutePlanner routePlanner = new DialogRoutePlanner();
     private final ClientSide clientSide = new ClientSide();
     private final ServerSide serverSide = new ServerSide();
@@ -159,6 +166,37 @@ public final class DialogTransactionBridge {
             NonInviteServerListener nonInviteServerDelegate,
             ReliableProvisionalManager reliableProvisionals
     ) {
+        this(
+                dialogs,
+                clientDelegate,
+                serverDelegate,
+                nonInviteClientDelegate,
+                nonInviteServerDelegate,
+                reliableProvisionals,
+                null
+        );
+    }
+
+    /**
+     * Creates a bridge with optional reliable provisional and INFO package coordination.
+     *
+     * @param dialogs Dialog lifecycle owner
+     * @param clientDelegate application INVITE client listener
+     * @param serverDelegate application INVITE server listener
+     * @param nonInviteClientDelegate application Non-INVITE client listener
+     * @param nonInviteServerDelegate fallback application Non-INVITE server listener
+     * @param reliableProvisionals optional RFC 3262 manager, or {@code null} to disable 100rel
+     * @param infoDispatcher optional RFC 6086 package dispatcher, or {@code null} to reject packaged INFO
+     */
+    public DialogTransactionBridge(
+            DialogManager dialogs,
+            InviteClientListener clientDelegate,
+            InviteServerListener serverDelegate,
+            NonInviteClientListener nonInviteClientDelegate,
+            NonInviteServerListener nonInviteServerDelegate,
+            ReliableProvisionalManager reliableProvisionals,
+            InfoDispatcher infoDispatcher
+    ) {
         this.dialogs = Objects.requireNonNull(dialogs, "dialogs");
         this.clientDelegate = Objects.requireNonNull(clientDelegate, "clientDelegate");
         this.serverDelegate = Objects.requireNonNull(serverDelegate, "serverDelegate");
@@ -171,6 +209,7 @@ public final class DialogTransactionBridge {
                 "nonInviteServerDelegate"
         );
         this.reliableProvisionals = reliableProvisionals;
+        this.infoDispatcher = infoDispatcher;
     }
 
     /**
@@ -600,6 +639,117 @@ public final class DialogTransactionBridge {
         return response;
     }
 
+    private boolean dispatchPackagedInfo(
+            ServerTransactionHandle transaction,
+            SipRequest request
+    ) throws SipHeaderValueException {
+        if (request.method() != SipMethod.INFO || !request.headers().contains("Info-Package")) {
+            return false;
+        }
+        if (SipHeaderValues.toTag(request.headers()).isEmpty()) {
+            transaction.sendResponse(SipResponses.createResponse(
+                    request,
+                    481,
+                    "Call/Transaction Does Not Exist",
+                    "loomsip"
+            ));
+            return true;
+        }
+        InfoPackageHeaderValue infoPackage = SipHeaderValues.infoPackage(request.headers());
+        InfoHandler handler = infoDispatcher == null
+                ? null
+                : infoDispatcher.find(infoPackage).orElse(null);
+        if (handler == null) {
+            sendUnsupportedInfoPackage(transaction, request);
+            return true;
+        }
+        CompletionStage<InfoResponse> completion;
+        try {
+            completion = Objects.requireNonNull(
+                    handler.onInfo(new InfoRequest(infoPackage, request.headers(), request.body())),
+                    "INFO handler completion"
+            );
+        } catch (Throwable cause) {
+            sendInfoHandlerFailure(transaction, request, cause);
+            return true;
+        }
+        completion.whenComplete((response, failure) -> {
+            if (failure != null) {
+                sendInfoHandlerFailure(transaction, request, failure);
+            } else if (response == null) {
+                sendInfoHandlerFailure(
+                        transaction,
+                        request,
+                        new IllegalStateException("INFO handler completed without a response")
+                );
+            } else {
+                sendInfoResponse(transaction, request, response);
+            }
+        });
+        return true;
+    }
+
+    private void sendUnsupportedInfoPackage(ServerTransactionHandle transaction, SipRequest request) {
+        try {
+            SipResponse base = SipResponses.createResponse(request, 469, "Bad Info Package");
+            SipHeaders headers = base.headers();
+            if (infoDispatcher != null && !infoDispatcher.supportedPackages().isEmpty()) {
+                headers = headers.withReplaced(
+                        "Recv-Info",
+                        new RecvInfoHeaderValue(infoDispatcher.supportedPackages()).wireValue()
+                );
+            }
+            transaction.sendResponse(new SipResponse(
+                    base.version(),
+                    base.statusCode(),
+                    base.reasonPhrase(),
+                    headers,
+                    base.body()
+            ));
+        } catch (Throwable cause) {
+            reportServerFailure("failed to reject unsupported INFO package", cause);
+        }
+    }
+
+    private void sendInfoResponse(
+            ServerTransactionHandle transaction,
+            SipRequest request,
+            InfoResponse response
+    ) {
+        try {
+            SipResponse base = SipResponses.createResponse(
+                    request,
+                    response.statusCode(),
+                    response.reasonPhrase()
+            );
+            SipHeaders headers = base.headers().toBuilder()
+                    .addAll(response.additionalHeaders().entries())
+                    .build();
+            transaction.sendResponse(new SipResponse(
+                    base.version(),
+                    base.statusCode(),
+                    base.reasonPhrase(),
+                    headers,
+                    response.body()
+            ));
+        } catch (Throwable cause) {
+            sendInfoHandlerFailure(transaction, request, cause);
+        }
+    }
+
+    private void sendInfoHandlerFailure(
+            ServerTransactionHandle transaction,
+            SipRequest request,
+            Throwable cause
+    ) {
+        reportServerFailure("INFO handler failed", cause);
+        try {
+            transaction.sendResponse(SipResponses.createResponse(request, 500, "Server Internal Error"));
+        } catch (Throwable responseFailure) {
+            reportServerFailure("failed to send INFO handler failure response", responseFailure);
+        }
+    }
+
     private final class ClientSide implements InviteClientListener {
 
         @Override
@@ -936,6 +1086,9 @@ public final class DialogTransactionBridge {
                 if (SipHeaderValues.toTag(request.headers()).isPresent()) {
                     DialogId id = DialogId.from(request.headers(), DialogRole.UAS);
                     await(dialogs.receiveInDialogRequest(id, request));
+                }
+                if (dispatchPackagedInfo(transaction, request)) {
+                    return;
                 }
             } catch (Throwable cause) {
                 rejectInDialogRequest(transaction, request, cause);

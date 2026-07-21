@@ -1,5 +1,6 @@
 package org.loomsip.dialog;
 
+import org.loomsip.info.InfoRequest;
 import org.loomsip.message.SipBody;
 import org.loomsip.message.SipHeaders;
 import org.loomsip.message.SipMethod;
@@ -93,6 +94,18 @@ public interface DialogHandle {
             SipHeaders additionalHeaders,
             SipBody body
     );
+
+    /**
+     * Constructs and starts a packaged RFC 6086 INFO in a Confirmed Dialog.
+     *
+     * <p>The Dialog owns the {@code Info-Package}, CSeq, Via branch, Route Set,
+     * and Remote Target. The supplied request must not contain its own
+     * {@code Info-Package} field.</p>
+     *
+     * @param request INFO package, application headers, and opaque body
+     * @return stage yielding the started Non-INVITE INFO transaction
+     */
+    CompletionStage<ClientTransactionHandle> sendInfo(InfoRequest request);
 
     /**
      * Returns lifecycle completion for this Dialog.

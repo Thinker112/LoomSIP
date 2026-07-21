@@ -9,27 +9,23 @@ import java.util.Objects;
 /**
  * Immutable application payload for one packaged RFC 6086 INFO request.
  *
- * <p>The package token is modeled separately so the Dialog layer can own the
- * resulting {@code Info-Package} header. Applications provide only additional
- * headers, such as {@code Content-Type}, and the opaque body.</p>
+ * <p>The package token is modeled separately from the original immutable SIP
+ * headers. The model does not interpret {@code Content-Type} or the body.</p>
  *
  * @param infoPackage INFO package selected by the application
- * @param additionalHeaders application headers excluding Info-Package
+ * @param headers immutable INFO request headers
  * @param body opaque INFO body
  */
 public record InfoRequest(
         InfoPackageHeaderValue infoPackage,
-        SipHeaders additionalHeaders,
+        SipHeaders headers,
         SipBody body
 ) {
 
-    /** Validates the package-owned header boundary and immutable payload. */
+    /** Validates the immutable request payload. */
     public InfoRequest {
         Objects.requireNonNull(infoPackage, "infoPackage");
-        Objects.requireNonNull(additionalHeaders, "additionalHeaders");
+        Objects.requireNonNull(headers, "headers");
         Objects.requireNonNull(body, "body");
-        if (additionalHeaders.contains("Info-Package")) {
-            throw new IllegalArgumentException("InfoRequest manages the Info-Package header");
-        }
     }
 }

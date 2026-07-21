@@ -2,6 +2,7 @@ package org.loomsip.dialog;
 
 import org.loomsip.concurrent.MailboxClosedException;
 import org.loomsip.concurrent.SerialMailbox;
+import org.loomsip.info.InfoRequest;
 import org.loomsip.message.SipMessage;
 import org.loomsip.message.SipMethod;
 import org.loomsip.message.SipBody;
@@ -237,6 +238,23 @@ public final class SipDialog implements DialogHandle {
             SipBody body
     ) {
         return sendRequest(SipMethod.UPDATE, additionalHeaders, body);
+    }
+
+    @Override
+    public CompletionStage<ClientTransactionHandle> sendInfo(InfoRequest request) {
+        Objects.requireNonNull(request, "request");
+        if (request.headers().contains("Info-Package")) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException(
+                    "sendInfo manages the Info-Package header"
+            ));
+        }
+        SipHeaders headers;
+        try {
+            headers = request.headers().withReplaced("Info-Package", request.infoPackage().wireValue());
+        } catch (RuntimeException exception) {
+            return CompletableFuture.failedFuture(exception);
+        }
+        return sendRequest(SipMethod.INFO, headers, request.body());
     }
 
     CompletionStage<DialogSessionState> configureSessionTimer(

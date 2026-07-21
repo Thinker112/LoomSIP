@@ -2,6 +2,9 @@ package org.loomsip.dialog;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.loomsip.info.InfoDispatcher;
+import org.loomsip.info.InfoRequest;
+import org.loomsip.info.InfoResponse;
 import org.loomsip.message.SipBody;
 import org.loomsip.message.SipHeaders;
 import org.loomsip.message.SipMethod;
@@ -10,6 +13,7 @@ import org.loomsip.message.SipResponse;
 import org.loomsip.message.SipResponses;
 import org.loomsip.message.SipUri;
 import org.loomsip.message.header.SentBy;
+import org.loomsip.message.header.InfoPackageHeaderValue;
 import org.loomsip.message.header.RAckHeaderValue;
 import org.loomsip.message.header.SipHeaderValues;
 import org.loomsip.message.header.SessionRefresher;
@@ -282,6 +286,68 @@ class DialogInDialogRequestTest {
     }
 
     @Test
+    void sendInfoUsesManagedPackageHeaderAndDialogRequestState() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            SipBody body = SipBody.of("floor-request".getBytes(StandardCharsets.US_ASCII));
+
+            ClientTransactionHandle transaction = await(dialog.sendInfo(new InfoRequest(
+                    new InfoPackageHeaderValue("conference"),
+                    SipHeaders.builder().add("Content-Type", "application/conference-info+xml").build(),
+                    body
+            )));
+
+            SipRequest request = rig.dispatcher.nonInvites.getFirst();
+            assertEquals(NonInviteClientState.TRYING, transaction.state());
+            assertEquals(SipMethod.INFO, request.method());
+            assertEquals("conference", request.headers().firstValue("Info-Package").orElseThrow());
+            assertEquals("application/conference-info+xml", request.headers().firstValue("Content-Type").orElseThrow());
+            assertEquals(body, request.body());
+            assertEquals(11, SipHeaderValues.cseq(request.headers()).sequenceNumber());
+        }
+    }
+
+    @Test
+    void sendInfoRejectsCallerPackageOverrideAndEarlyDialog() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            InfoRequest overridden = new InfoRequest(
+                    new InfoPackageHeaderValue("conference"),
+                    SipHeaders.builder().add("Info-Package", "override").build(),
+                    SipBody.empty()
+            );
+            assertThrows(IllegalArgumentException.class, () -> await(dialog.sendInfo(overridden)));
+        }
+
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createEarlyDialog();
+            assertThrows(IllegalStateException.class, () -> await(dialog.sendInfo(new InfoRequest(
+                    new InfoPackageHeaderValue("conference"),
+                    SipHeaders.empty(),
+                    SipBody.empty()
+            ))));
+        }
+    }
+
+    @Test
+    void referRemainsGenericConfirmedDialogRequestWithoutSubscriptionSemantics() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+
+            await(dialog.sendRequest(
+                    SipMethod.REFER,
+                    SipHeaders.builder().add("Refer-To", "<sip:carol@example.com>").build(),
+                    SipBody.empty()
+            ));
+
+            SipRequest request = rig.dispatcher.nonInvites.getFirst();
+            assertEquals(SipMethod.REFER, request.method());
+            assertEquals("<sip:carol@example.com>", request.headers().firstValue("Refer-To").orElseThrow());
+            assertEquals(11, SipHeaderValues.cseq(request.headers()).sequenceNumber());
+        }
+    }
+
+    @Test
     void uasRejectsTooSmallUpdateBeforeApplicationCallback() throws Exception {
         try (TestRig rig = new TestRig()) {
             DialogHandle dialog = rig.createDialog();
@@ -482,6 +548,117 @@ class DialogInDialogRequestTest {
     }
 
     @Test
+    void bridgeDispatchesPackagedInfoAfterDialogValidation() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            InfoDispatcher dispatcher = new InfoDispatcher();
+            AtomicReference<InfoRequest> delivered = new AtomicReference<>();
+            dispatcher.register(new InfoPackageHeaderValue("conference"), request -> {
+                delivered.set(request);
+                return CompletableFuture.completedFuture(new InfoResponse(
+                        200,
+                        "OK",
+                        SipHeaders.builder().add("X-Info-Handled", "true").build(),
+                        SipBody.of("accepted".getBytes(StandardCharsets.US_ASCII))
+                ));
+            });
+            AtomicInteger fallbackCallbacks = new AtomicInteger();
+            DialogTransactionBridge bridge = bridge(
+                    rig,
+                    (transaction, request, context) -> fallbackCallbacks.incrementAndGet(),
+                    dispatcher
+            );
+            RecordingServerTransaction transaction = new RecordingServerTransaction();
+            SipRequest request = withInfoPackage(inbound(SipMethod.INFO, 21, false), "conference");
+
+            bridge.nonInviteServerListener().onRequest(transaction, request, context(rig));
+
+            assertEquals(0, fallbackCallbacks.get());
+            assertEquals(21, dialog.snapshot().remoteCSeq());
+            assertEquals("conference", delivered.get().infoPackage().name());
+            assertEquals(200, transaction.response.get().statusCode());
+            assertEquals("true", transaction.response.get().headers().firstValue("X-Info-Handled").orElseThrow());
+            assertEquals("accepted", new String(transaction.response.get().body().bytes(), StandardCharsets.US_ASCII));
+        }
+    }
+
+    @Test
+    void bridgeRejectsUnknownInfoPackageWithRecvInfo() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            InfoDispatcher dispatcher = new InfoDispatcher();
+            dispatcher.register(new InfoPackageHeaderValue("conference"),
+                    request -> CompletableFuture.completedFuture(InfoResponse.ok()));
+            AtomicInteger fallbackCallbacks = new AtomicInteger();
+            DialogTransactionBridge bridge = bridge(
+                    rig,
+                    (transaction, request, context) -> fallbackCallbacks.incrementAndGet(),
+                    dispatcher
+            );
+            RecordingServerTransaction transaction = new RecordingServerTransaction();
+
+            bridge.nonInviteServerListener().onRequest(
+                    transaction,
+                    withInfoPackage(inbound(SipMethod.INFO, 21, false), "x-vendor"),
+                    context(rig)
+            );
+
+            assertEquals(0, fallbackCallbacks.get());
+            assertEquals(21, dialog.snapshot().remoteCSeq());
+            assertEquals(469, transaction.response.get().statusCode());
+            assertEquals("conference", transaction.response.get().headers().firstValue("Recv-Info").orElseThrow());
+        }
+    }
+
+    @Test
+    void bridgeRejectsPackagedInfoOutsideDialog() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            InfoDispatcher dispatcher = new InfoDispatcher();
+            dispatcher.register(new InfoPackageHeaderValue("conference"),
+                    request -> CompletableFuture.completedFuture(InfoResponse.ok()));
+            DialogTransactionBridge bridge = bridge(rig, (transaction, request, context) -> {
+            }, dispatcher);
+            RecordingServerTransaction transaction = new RecordingServerTransaction();
+            SipRequest request = withInfoPackage(
+                    inbound(SipMethod.INFO, 21, false),
+                    "conference"
+            );
+            request = new SipRequest(
+                    request.method(),
+                    request.requestUri(),
+                    request.version(),
+                    request.headers().withReplaced("To", "<sip:alice@example.com>"),
+                    request.body()
+            );
+
+            bridge.nonInviteServerListener().onRequest(transaction, request, context(rig));
+
+            assertEquals(481, transaction.response.get().statusCode());
+        }
+    }
+
+    @Test
+    void bridgeConvertsInfoHandlerFailureToServerError() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            InfoDispatcher dispatcher = new InfoDispatcher();
+            dispatcher.register(new InfoPackageHeaderValue("conference"),
+                    request -> CompletableFuture.failedFuture(new IllegalStateException("handler failure")));
+            DialogTransactionBridge bridge = bridge(rig, (transaction, request, context) -> {
+            }, dispatcher);
+            RecordingServerTransaction transaction = new RecordingServerTransaction();
+
+            rig.createDialog();
+            bridge.nonInviteServerListener().onRequest(
+                    transaction,
+                    withInfoPackage(inbound(SipMethod.INFO, 21, false), "conference"),
+                    context(rig)
+            );
+
+            assertEquals(500, transaction.response.get().statusCode());
+        }
+    }
+
+    @Test
     void concurrentReInvitesReceiveUniqueMonotonicLocalSequences() throws Exception {
         try (TestRig rig = new TestRig();
                 ExecutorService callers = Executors.newFixedThreadPool(8)) {
@@ -593,6 +770,16 @@ class DialogInDialogRequestTest {
         );
     }
 
+    private static SipRequest withInfoPackage(SipRequest request, String value) {
+        return new SipRequest(
+                request.method(),
+                request.requestUri(),
+                request.version(),
+                request.headers().withReplaced("Info-Package", value),
+                request.body()
+        );
+    }
+
     private static SipResponse withSessionExpires(SipResponse response, String value) {
         return new SipResponse(
                 response.version(),
@@ -641,6 +828,25 @@ class DialogInDialogRequestTest {
                 (transaction, response, context) -> {
                 },
                 serverListener
+        );
+    }
+
+    private static DialogTransactionBridge bridge(
+            TestRig rig,
+            org.loomsip.transaction.noninvite.NonInviteServerListener serverListener,
+            InfoDispatcher infoDispatcher
+    ) {
+        return new DialogTransactionBridge(
+                rig.manager,
+                (transaction, response, context) -> {
+                },
+                (transaction, request, context) -> {
+                },
+                (transaction, response, context) -> {
+                },
+                serverListener,
+                null,
+                infoDispatcher
         );
     }
 

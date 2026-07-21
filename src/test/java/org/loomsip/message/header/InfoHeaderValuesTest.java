@@ -26,6 +26,8 @@ class InfoHeaderValuesTest {
         assertEquals(List.of("conference", "x-vendor", "dtmf"),
                 recvInfo.packages().stream().map(InfoPackageHeaderValue::name).toList());
         assertEquals("conference, x-vendor, dtmf", recvInfo.wireValue());
+        assertEquals("conference, x-vendor, dtmf", recvInfo.applyTo(SipHeaders.empty())
+                .firstValue("Recv-Info").orElseThrow());
     }
 
     @Test

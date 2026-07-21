@@ -4,6 +4,7 @@ import org.loomsip.message.SipBody;
 import org.loomsip.message.SipHeaders;
 
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Immutable final response selected by an INFO application handler.
@@ -23,6 +24,10 @@ public record InfoResponse(
         SipBody body
 ) {
 
+    private static final Set<String> TRANSACTION_HEADERS = Set.of(
+            "Via", "From", "To", "Call-ID", "CSeq", "Content-Length"
+    );
+
     /** Validates one final SIP response and its immutable application payload. */
     public InfoResponse {
         if (statusCode < 200 || statusCode > 699) {
@@ -33,6 +38,11 @@ public record InfoResponse(
         }
         Objects.requireNonNull(additionalHeaders, "additionalHeaders");
         Objects.requireNonNull(body, "body");
+        for (String header : TRANSACTION_HEADERS) {
+            if (additionalHeaders.contains(header)) {
+                throw new IllegalArgumentException("INFO response cannot override transaction header " + header);
+            }
+        }
     }
 
     /**

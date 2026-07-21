@@ -23,16 +23,17 @@ class InfoModelTest {
     }
 
     @Test
-    void rejectsManagedRequestHeaderAndNonFinalResponse() {
-        assertThrows(IllegalArgumentException.class, () -> new InfoRequest(
-                new InfoPackageHeaderValue("conference"),
-                SipHeaders.builder().add("Info-Package", "override").build(),
-                SipBody.empty()
-        ));
+    void rejectsNonFinalAndTransactionManagedResponseHeaders() {
         assertThrows(IllegalArgumentException.class, () -> new InfoResponse(
                 180,
                 "Ringing",
                 SipHeaders.empty(),
+                SipBody.empty()
+        ));
+        assertThrows(IllegalArgumentException.class, () -> new InfoResponse(
+                200,
+                "OK",
+                SipHeaders.builder().add("CSeq", "2 INFO").build(),
                 SipBody.empty()
         ));
     }
