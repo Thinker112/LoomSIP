@@ -6,7 +6,7 @@
 
 本阶段建立通用 Subscription 框架。目标不是仅透传 `SUBSCRIBE` 与 `NOTIFY`，而是定义可独立于 Dialog 生命周期存在的订阅状态、过期 Timer、事件分派和关闭收敛规则。
 
-实施状态：7A～7B 已完成，7C 已完成 Subscription Mailbox 的 NOTIFY 生命周期入口（2026-07-21）；真实 Transaction 路由及 7D～7G 待执行。
+实施状态：7A～7E 已完成组件级实现与确定性测试（2026-07-21）；7F REFER event package 与 7G UDP/TCP/TLS 端到端验收待执行。
 
 ## 2. 并发与所有权
 
@@ -112,10 +112,12 @@ NEW -> PENDING -> ACTIVE -> TERMINATED
 
 ### 4.5 7E：刷新、取消、终止与关闭
 
-- 相同 identity 的 SUBSCRIBE refresh 只更新 Expires，不创建重复 Subscription。
-- `Expires: 0` 发起取消；UAS 发送最终 NOTIFY 并清理状态。
-- 覆盖 NOTIFY terminated、Timer、transport failure、异步 Handler completion 与关闭竞争。
-- 验证 Dialog、Transaction、Subscription 三类 Mailbox 的所有权边界及单终态不变量。
+- 已实现带 To tag 的 UAS SUBSCRIBE refresh：按既有 `SubscriptionId` 更新 Expires、复用 To tag，并且不重新调用 Event package Handler 或创建第二个 Subscription。
+- 接受初始 SUBSCRIBE 时，Listener 会先成功注册 Expires Timer，再发送 2xx；缺少 Scheduler 等 setup 失败会清理刚创建的 Subscription 并回复 500，避免残留 pending identity。
+- 已增加 `SubscriptionTerminationListener`：Manager 在同一 Subscription Mailbox 内完成 identity 删除后，至多一次地交付不可变终态 Snapshot。该钩子不拥有路由，也不得阻塞或重入状态机。
+- 已增加 `SubscriptionFinalNotifier` 与 `SubscriptionFinalNotification`：UAS 集成层显式登记 Contact 路由、目标 Transport 和受控 NOTIFY CSeq；本地 `Expires: 0` 转换为 `terminated;reason=deactivated`，Timer 到期转换为 `terminated;reason=timeout`。远端终止、setup 失败和 Stack close 只释放上下文，不发送额外 NOTIFY。
+- `SubscriptionSubscribeServerListener` 可选接收 `SubscriptionFinalNotifier` 与 `SubscriptionFinalNotificationFactory`。工厂从已接受初始 SUBSCRIBE 的请求和 TransportContext 构造最终 NOTIFY 上下文；它们必须成对提供，避免把 Contact 路由或 CSeq 计数错误地下沉到通用状态机。
+- 已验证 Timer replacement、Expires: 0、remote terminate、Manager close 及 UDP NICT 重传共存时，最终通知只创建一个唯一 Via branch 的事务。Dialog、Transaction、Subscription 三类 Mailbox 的所有权边界保持不变。
 
 ### 4.6 7F：REFER event package
 

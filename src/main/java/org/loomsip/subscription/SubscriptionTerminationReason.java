@@ -8,6 +8,8 @@ public enum SubscriptionTerminationReason {
     LOCAL_CANCELLED,
     /** Subscription Expires timer elapsed. */
     EXPIRED,
+    /** UAS setup failed before a successful SUBSCRIBE response was sent. */
+    SETUP_FAILED,
     /** Transaction or transport failure made the subscription unusable. */
     TRANSPORT_FAILURE,
     /** Owning SubscriptionManager closed. */
