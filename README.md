@@ -2,7 +2,7 @@
 
 LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协议栈，目标是遵循 RFC 3261 的协议分层与事务语义，并通过 Netty 和 Java 虚拟线程建立清晰、可测试的并发模型。
 
-项目当前处于核心协议栈开发阶段。仓库已经实现不可变 SIP 消息模型、Parser/Encoder、Netty UDP Transport、TCP/TLS 可靠传输、四类 Transaction 状态机、Dialog Layer，以及 INVITE/ACK/re-INVITE/BYE/CANCEL 基本呼叫流程，并已具备 Digest、PRACK、Session Timer 和 INFO 的核心能力。统一 Stack API、完整事件框架和更多部署能力仍在后续规划中，因此当前版本暂不适合生产环境使用。
+项目当前处于核心协议栈开发阶段。仓库已经实现不可变 SIP 消息模型、Parser/Encoder、Netty UDP Transport、TCP/TLS 可靠传输、四类 Transaction 状态机、Dialog Layer，以及 INVITE/ACK/re-INVITE/BYE/CANCEL 基本呼叫流程，并已具备 Digest、PRACK、Session Timer 和 INFO 的核心能力。Stack API 的生命周期骨架已经建立，完整组件装配、事件框架和更多部署能力仍在后续规划中，因此当前版本暂不适合生产环境使用。
 
 ## 设计目标
 
@@ -34,7 +34,7 @@ LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协
 | UPDATE / Session Timer | 已实现（6E） | UPDATE、Session-Expires/Min-SE、UAC/UAS 协商、generation-safe Timer、422 单次重试和刷新失败闭环 |
 | INFO / Extension Dispatch | 已实现（6F） | `Info-Package`、`Recv-Info`、线程安全 Handler 注册表、入站分派、469/481/500 语义和 `sendInfo` API 已完成；REFER 保持通用请求边界 |
 | 6G Transport Scenarios | 已完成（6G-A～6G-F） | 测试专用 Endpoint、真实 UDP/TCP/TLS Dialog + INFO、Digest 401/重试、PRACK、Session Timer，以及 Exchange/Dialog/Transaction/Endpoint 的关闭与迟到事件收敛验收 |
-| Stack API | 后续规划 | 统一组件装配、配置和关闭顺序 |
+| Stack API | 进行中（8A 已完成） | 生命周期根节点、资源所有权、配置和关闭顺序；组件自动装配后续实现 |
 
 当前 `SipMessageParser` 接收一条已经完成边界识别的 SIP 报文。TCP 半包、粘包以及同一字节流中的多条消息，已经由 Transport stream decoder 完成分帧。
 
