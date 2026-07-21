@@ -45,6 +45,21 @@ class SessionTimerManagerTest {
         assertEquals(SessionTimerAction.EXPIRE, actions.getFirst().action());
     }
 
+    @Test
+    void closingTimerSuppressesLateScheduledSignal() {
+        VirtualSipScheduler scheduler = new VirtualSipScheduler();
+        List<SessionTimerSignal> actions = new ArrayList<>();
+        SessionTimerManager manager = new SessionTimerManager(scheduler, Runnable::run, actions::add, 8);
+
+        await(manager.configure(new SessionTimerNegotiator.NegotiatedSessionTimer(
+                120, SessionRefresher.UAC, SessionRefreshMethod.UPDATE
+        ), true));
+        manager.close();
+        scheduler.advanceBy(Duration.ofSeconds(120));
+
+        assertEquals(List.of(), actions);
+    }
+
     private static <T> T await(CompletionStage<T> stage) {
         return stage.toCompletableFuture().join();
     }

@@ -236,6 +236,29 @@ class NonInviteTransactionManagerTest {
         }
     }
 
+    @Test
+    void lateResponseAfterClientManagerCloseIsIgnored() throws Exception {
+        try (TestRig rig = new TestRig((transaction, request) -> {
+        })) {
+            ClientTransactionHandle client = rig.sendOptions();
+            rig.clientManager.close();
+
+            rig.clientManager.onMessage(new InboundSipMessage(
+                    ok(client.originalRequest()),
+                    new TransportContext(
+                            TransportProtocol.UDP,
+                            rig.clientEndpoint.address(),
+                            rig.serverEndpoint.address()
+                    )
+            ));
+
+            assertEquals(NonInviteClientState.TERMINATED, client.state());
+            assertEquals(0, rig.clientManager.activeClientTransactions());
+            assertEquals(List.of(), rig.client.statuses);
+            assertEquals(List.of(), rig.client.layerErrors);
+        }
+    }
+
     private static SipResponse ok(SipRequest request) {
         return SipResponses.createResponse(request, 200, "OK", "server-tag");
     }

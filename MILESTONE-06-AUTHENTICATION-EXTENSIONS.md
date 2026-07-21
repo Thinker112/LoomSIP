@@ -608,7 +608,7 @@ Dialog Bridge -- Dialog Mailbox --> identity / CSeq validation
 
 ## 12. 6G：完整场景和验收
 
-实施状态：进行中。6G-A～6G-C 已完成（2026-07-21）；6G-D～6G-F 待执行。本阶段不新增生产 Stack API。
+实施状态：已完成。6G-A～6G-F 已完成（2026-07-21）。本阶段未新增生产 Stack API。
 
 ### 12.0 实施拆分
 
@@ -648,16 +648,24 @@ Dialog Bridge -- Dialog Mailbox --> identity / CSeq validation
 
 #### 6G-D：PRACK / Session Timer 组合
 
-- 三种 Transport 覆盖 100rel 的成功 183 + PRACK + 200 流程。
-- 仅 UDP 覆盖丢失可靠临时响应或 PRACK 的重传；可靠 Transport 不重复验证 UDP 重传语义。
-- Session Timer 覆盖协商、UPDATE 刷新、422 重试和过期清理；Timer 一律由虚拟时间推进。
+- 已在 UDP、TCP、TLS 覆盖 `183 Require: 100rel`、自动 PRACK、PRACK `200 OK` 和最终 INVITE `200 OK`。断言 RAck 的 RSeq/INVITE CSeq 对应关系，以及 Dialog 分配的 PRACK CSeq。
+- UDP 使用独立的可靠临时响应虚拟 Scheduler 模拟 PRACK 丢失，推进 T1 后确认同一带 RSeq 的 183 经真实 UDP 重传；TCP/TLS 不重复验证 UDP 重传语义。
+- 三种 Transport 已覆盖协商后的 Session Timer 自动 UPDATE 刷新；自动刷新和 422 重试请求现在带有本地 Contact，满足 UPDATE 的 target-refresh 约束。UDP 额外覆盖 `422 + Min-SE` 后仅创建一次间隔增大的 CSeq 重试，以及 `refresher=uas` 在完整 Session-Expires 后触发 `SESSION_EXPIRED` 并清理 Dialog。所有定时推进都使用虚拟时间。
 
 #### 6G-E：并发、资源与关闭
 
-- 注入同一 Dialog 的超时、Transport failure、认证或刷新完成竞争，验证只完成一次。
-- 验证关闭后的 Future 最终完成，迟到事件不能复活 Transaction、Dialog 或 Exchange 状态。
+- 已验证关闭前已入队、但尚未进入 mailbox drain 的 Exchange `start()` 会立即异常完成；关闭丢弃该事件，随后执行迟到 drain 也不会调用 Attempt Factory 或将 Exchange 从 CLOSED 复活。
+- 已验证 Session Timer 关闭会取消当前 deadline；在原 Scheduler 上推进到已取消的时间后，不会产生新的 REFRESH 或 EXPIRE 信号。
+- 已验证认证协调器等待 Credential 时关闭，迟到的 Credential completion 不会创建认证重试 Attempt，也不会改变 CLOSED 状态。
+- 已验证 Non-INVITE Transaction Manager 关闭后丢弃网络中迟到的最终响应；已终止 Transaction 不会收到 TU response callback 或产生 layer error。
+- 已验证自动 Session Timer UPDATE timeout 终止 Dialog 后，迟到的成功响应即使携带新的 Session-Expires，也不能重新配置 timer、复活 Dialog 或发送额外刷新请求。
+- 已验证自动 Session Timer UPDATE transport failure 终止 Dialog 后，迟到的成功响应同样不能复活 Dialog；ScenarioEndpoint 关闭后也会丢弃进入已绑定 inbound Handler 的晚到请求，不创建新的 NIST 或 TU callback。
+- 当前确定性关闭边界、迟到事件处理与资源收敛已覆盖；跨 UDP/TCP/TLS 的长时重复压力属于后续性能与稳定性工作。
 
 #### 6G-F：汇总验收
+
+- 已完成全量 Maven 测试、Javadoc 和 `git diff --check`；本次汇总共 248 项测试通过。
+- 下表记录实际验收范围；“完整”表示该能力已经有对应真实 Transport 场景或其明确的 UDP 专有场景，非所有 RFC 可选分支均已实现。
 
 | 场景 | UDP | TCP | TLS |
 | --- | --- | --- | --- |

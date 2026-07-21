@@ -7,6 +7,7 @@ import org.loomsip.message.SipResponse;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
@@ -48,6 +49,7 @@ public final class ClientRequestExchange<T> implements AutoCloseable {
     private final Consumer<? super Throwable> failureListener;
     private final SerialMailbox<ClientRequestExchangeEvent<T>> mailbox;
     private final CompletableFuture<SipResponse> completion = new CompletableFuture<>();
+    private final Set<CompletableFuture<?>> operations = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closeRequested = new AtomicBoolean();
 
     private volatile ClientRequestExchangeState state = ClientRequestExchangeState.NEW;
@@ -114,6 +116,7 @@ public final class ClientRequestExchange<T> implements AutoCloseable {
      */
     public CompletionStage<RequestAttempt<T>> start() {
         CompletableFuture<RequestAttempt<T>> result = new CompletableFuture<>();
+        track(result);
         submit(new ExchangeStart<>(result), result);
         return result.minimalCompletionStage();
     }
@@ -129,6 +132,7 @@ public final class ClientRequestExchange<T> implements AutoCloseable {
      */
     public CompletionStage<RequestAttempt<T>> retry(SipRequest request) {
         CompletableFuture<RequestAttempt<T>> result = new CompletableFuture<>();
+        track(result);
         submit(new ExchangeRetry<>(Objects.requireNonNull(request, "request"), result), result);
         return result.minimalCompletionStage();
     }
@@ -141,6 +145,7 @@ public final class ClientRequestExchange<T> implements AutoCloseable {
      */
     public CompletionStage<Void> complete(SipResponse response) {
         CompletableFuture<Void> result = new CompletableFuture<>();
+        track(result);
         submit(new ExchangeComplete<>(Objects.requireNonNull(response, "response"), result), result);
         return result.minimalCompletionStage();
     }
@@ -153,6 +158,7 @@ public final class ClientRequestExchange<T> implements AutoCloseable {
      */
     public CompletionStage<Void> fail(Throwable cause) {
         CompletableFuture<Void> result = new CompletableFuture<>();
+        track(result);
         submit(new ExchangeFailed<>(Objects.requireNonNull(cause, "cause"), result), result);
         return result.minimalCompletionStage();
     }
@@ -210,13 +216,12 @@ public final class ClientRequestExchange<T> implements AutoCloseable {
         if (!closeRequested.compareAndSet(false, true)) {
             return;
         }
-        try {
-            mailbox.submit(new ExchangeClose<>());
-        } catch (MailboxClosedException ignored) {
-            // A normal complete/fail event already closed the mailbox.
-        } catch (Throwable cause) {
-            handleInfrastructureFailure(cause);
+        if (state == ClientRequestExchangeState.NEW || state == ClientRequestExchangeState.ACTIVE) {
+            state = ClientRequestExchangeState.CLOSED;
+            completion.completeExceptionally(new ClientRequestExchangeClosedException());
         }
+        completePendingExceptionally(new ClientRequestExchangeClosedException());
+        mailbox.closeNow();
     }
 
     private void handleEvent(ClientRequestExchangeEvent<T> event) {
@@ -320,6 +325,15 @@ public final class ClientRequestExchange<T> implements AutoCloseable {
         } catch (Throwable cause) {
             result.completeExceptionally(cause);
         }
+    }
+
+    private void track(CompletableFuture<?> operation) {
+        operations.add(operation);
+        operation.whenComplete((ignored, failure) -> operations.remove(operation));
+    }
+
+    private void completePendingExceptionally(Throwable cause) {
+        operations.forEach(operation -> operation.completeExceptionally(cause));
     }
 
     private void handleInfrastructureFailure(Throwable cause) {

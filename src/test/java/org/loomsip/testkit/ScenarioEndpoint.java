@@ -9,6 +9,7 @@ import org.loomsip.dialog.DialogRequestRuntime;
 import org.loomsip.dialog.DialogRuntime;
 import org.loomsip.dialog.DialogTransactionBridge;
 import org.loomsip.dialog.InMemoryDialogRepository;
+import org.loomsip.dialog.ReliableProvisionalManager;
 import org.loomsip.info.InfoDispatcher;
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.header.SentBy;
@@ -103,6 +104,50 @@ public final class ScenarioEndpoint implements AutoCloseable {
             NonInviteServerListener nonInviteServer,
             InfoDispatcher infoDispatcher
     ) {
+        return create(
+                transport,
+                sender,
+                remote,
+                timerConfig,
+                lifecycle,
+                inviteClient,
+                inviteServer,
+                nonInviteClient,
+                nonInviteServer,
+                null,
+                infoDispatcher
+        );
+    }
+
+    /**
+     * Assembles one endpoint with optional RFC 3262 and INFO services.
+     *
+     * @param transport started local transport used for endpoint identity
+     * @param sender raw or connection-aware sender selected by the scenario
+     * @param remote resolved peer endpoint for Dialog-generated requests
+     * @param timerConfig transaction timer configuration
+     * @param lifecycle Dialog lifecycle observer
+     * @param inviteClient INVITE client application listener
+     * @param inviteServer INVITE server application listener
+     * @param nonInviteClient Non-INVITE client application listener
+     * @param nonInviteServer fallback Non-INVITE server application listener
+     * @param reliableProvisionals optional RFC 3262 coordinator
+     * @param infoDispatcher optional packaged INFO dispatcher
+     * @return assembled endpoint
+     */
+    public static ScenarioEndpoint create(
+            SipTransport transport,
+            TransactionMessageSender sender,
+            TransportEndpoint remote,
+            SipTimerConfig timerConfig,
+            DialogLifecycleListener lifecycle,
+            InviteClientListener inviteClient,
+            InviteServerListener inviteServer,
+            NonInviteClientListener nonInviteClient,
+            NonInviteServerListener nonInviteServer,
+            ReliableProvisionalManager reliableProvisionals,
+            InfoDispatcher infoDispatcher
+    ) {
         Objects.requireNonNull(transport, "transport");
         TransportEndpoint local = transport.localEndpoint();
         VirtualSipScheduler scheduler = new VirtualSipScheduler();
@@ -153,7 +198,7 @@ public final class ScenarioEndpoint implements AutoCloseable {
                 Objects.requireNonNull(inviteServer, "inviteServer"),
                 Objects.requireNonNull(nonInviteClient, "nonInviteClient"),
                 Objects.requireNonNull(nonInviteServer, "nonInviteServer"),
-                null,
+                reliableProvisionals,
                 infoDispatcher
         );
         InviteTransactionManager inviteTransactions = new InviteTransactionManager(

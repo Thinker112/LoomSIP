@@ -178,6 +178,39 @@ class ClientRequestExchangeTest {
         await(exchange.closed());
     }
 
+    @Test
+    void closeBeforeMailboxDrainPreventsLateStartFromRevivingExchange() {
+        List<Runnable> queuedDrains = new ArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger factoryCalls = new java.util.concurrent.atomic.AtomicInteger();
+        ClientRequestExchange<String> exchange = new ClientRequestExchange<>(
+                request(1, "initial"),
+                context -> {
+                    factoryCalls.incrementAndGet();
+                    return "transaction";
+                },
+                RequestRetryPolicy.DEFAULT,
+                queuedDrains::add,
+                failure -> {
+                },
+                8
+        );
+
+        java.util.concurrent.CompletionStage<RequestAttempt<String>> start = exchange.start();
+        exchange.close();
+
+        CompletionException failure = assertThrows(CompletionException.class, () -> await(start));
+        assertInstanceOf(ClientRequestExchangeClosedException.class, failure.getCause());
+        assertEquals(ClientRequestExchangeState.CLOSED, exchange.state());
+        assertEquals(0, factoryCalls.get());
+        assertEquals(1, queuedDrains.size());
+
+        queuedDrains.getFirst().run();
+
+        assertEquals(ClientRequestExchangeState.CLOSED, exchange.state());
+        assertEquals(0, factoryCalls.get());
+        await(exchange.closed());
+    }
+
     private static SipRequest request(long cseq, String branch) {
         return new SipRequest(
                 SipMethod.OPTIONS,

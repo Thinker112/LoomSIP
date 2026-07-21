@@ -158,6 +158,36 @@ class ClientAuthenticationCoordinatorTest {
         await(coordinator.closed());
     }
 
+    @Test
+    void lateCredentialCompletionAfterCloseCannotStartRetry() {
+        SipRequest initial = request(1, "first", false);
+        List<SipRequest> started = new ArrayList<>();
+        ClientRequestExchange<String> exchange = exchange(initial, started, 2);
+        CompletableFuture<Optional<ClientDigestCredential>> credential = new CompletableFuture<>();
+        ClientAuthenticationCoordinator<String> coordinator = coordinator(
+                exchange,
+                ignored -> credential,
+                retryFactory(2, "second"),
+                ClientAuthenticationPolicy.DEFAULT
+        );
+        await(coordinator.start());
+
+        java.util.concurrent.CompletionStage<ClientAuthenticationResult<String>> response = coordinator.onResponse(challenge(
+                401,
+                "WWW-Authenticate",
+                "Digest realm=\"origin\", nonce=\"nonce-1\", qop=auth"
+        ));
+        coordinator.close();
+        credential.complete(Optional.of(new ClientDigestCredential("alice", "secret".toCharArray())));
+
+        CompletionException failure = assertThrows(CompletionException.class, () -> await(response));
+        assertInstanceOf(ClientAuthenticationClosedException.class, failure.getCause());
+        assertEquals(ClientAuthenticationCoordinatorState.CLOSED, coordinator.state());
+        assertEquals(1, exchange.attemptCount());
+        assertEquals(List.of(initial), started);
+        await(coordinator.closed());
+    }
+
     private static ClientAuthenticationCoordinator<String> coordinator(
             ClientRequestExchange<String> exchange,
             ClientCredentialProvider provider,

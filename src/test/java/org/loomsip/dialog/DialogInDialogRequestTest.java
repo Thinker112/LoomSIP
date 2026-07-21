@@ -469,6 +469,62 @@ class DialogInDialogRequestTest {
     }
 
     @Test
+    void lateSessionRefreshSuccessAfterTimeoutCannotReviveTerminatedDialog() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            await(rig.manager.configureSessionTimer(dialog.id(), negotiated(120), true));
+            DialogTransactionBridge bridge = bridge(rig, (transaction, request, context) -> {
+            });
+
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(60));
+            ClientTransactionHandle refresh = rig.dispatcher.nonInviteHandles.getFirst();
+            bridge.nonInviteClientListener().onTimeout(refresh, SipTimer.F);
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+            assertTrue(rig.manager.find(dialog.id()).isEmpty());
+
+            bridge.nonInviteClientListener().onResponse(
+                    refresh,
+                    withSessionExpires(SipResponses.createResponse(refresh.originalRequest(), 200, "OK"),
+                            "240;refresher=uac"),
+                    context(rig)
+            );
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(300));
+
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+            assertTrue(rig.manager.find(dialog.id()).isEmpty());
+            assertEquals(1, rig.dispatcher.nonInvites.size());
+        }
+    }
+
+    @Test
+    void lateSessionRefreshSuccessAfterTransportFailureCannotReviveTerminatedDialog() throws Exception {
+        try (TestRig rig = new TestRig()) {
+            DialogHandle dialog = rig.createDialog();
+            await(rig.manager.configureSessionTimer(dialog.id(), negotiated(120), true));
+            DialogTransactionBridge bridge = bridge(rig, (transaction, request, context) -> {
+            });
+
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(60));
+            ClientTransactionHandle refresh = rig.dispatcher.nonInviteHandles.getFirst();
+            bridge.nonInviteClientListener().onTransportFailure(refresh, new IllegalStateException("write failed"));
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+            assertTrue(rig.manager.find(dialog.id()).isEmpty());
+
+            bridge.nonInviteClientListener().onResponse(
+                    refresh,
+                    withSessionExpires(SipResponses.createResponse(refresh.originalRequest(), 200, "OK"),
+                            "240;refresher=uac"),
+                    context(rig)
+            );
+            rig.scheduler.advanceBy(java.time.Duration.ofSeconds(300));
+
+            assertEquals(DialogState.TERMINATED, dialog.snapshot().state());
+            assertTrue(rig.manager.find(dialog.id()).isEmpty());
+            assertEquals(1, rig.dispatcher.nonInvites.size());
+        }
+    }
+
+    @Test
     void genericApiRejectsMethodsWithDedicatedSemantics() throws Exception {
         try (TestRig rig = new TestRig()) {
             DialogHandle dialog = rig.createDialog();

@@ -450,6 +450,7 @@ public final class SipDialog implements DialogHandle {
                 ).wireValue())
                 .add("Min-SE", Integer.toString(retry.minimumSeconds()))
                 .add("Supported", "timer")
+                .add("Contact", contactValue())
                 .build();
         startSessionRefresh(current, headers, retry.result());
     }
@@ -480,6 +481,7 @@ public final class SipDialog implements DialogHandle {
                         Optional.of(localRole)
                 ).wireValue())
                 .add("Supported", "timer")
+                .add("Contact", contactValue())
                 .build();
         startSessionRefresh(current, headers, null);
     }
@@ -838,6 +840,10 @@ public final class SipDialog implements DialogHandle {
         );
         updateSnapshot(snapshot.state(), next, snapshot.remoteCSeq(), snapshot.remoteTarget());
         return prepared;
+    }
+
+    private String contactValue() {
+        return '<' + snapshot.localUri().toString() + '>';
     }
 
     private void handleInDialogRequest(DialogInDialogRequestReceived event) {

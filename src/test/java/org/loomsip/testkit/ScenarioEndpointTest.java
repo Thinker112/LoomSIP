@@ -26,6 +26,7 @@ import java.net.InetSocketAddress;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -82,6 +83,47 @@ class ScenarioEndpointTest {
 
         assertTrue(client.closed);
         assertTrue(server.closed);
+    }
+
+    @Test
+    void closedEndpointIgnoresLateInboundRequest() throws Exception {
+        TransportEndpoint local = TransportEndpoint.udp(new InetSocketAddress(InetAddress.getLoopbackAddress(), 25064));
+        TransportEndpoint remote = TransportEndpoint.udp(new InetSocketAddress(InetAddress.getLoopbackAddress(), 25065));
+        AtomicInteger callbacks = new AtomicInteger();
+        TransactionMessageSender sender = (message, target) -> CompletableFuture.completedFuture(
+                new SendResult(local, target, 1)
+        );
+        ScenarioInboundHandler inbound = new ScenarioInboundHandler();
+        ScenarioEndpoint endpoint = ScenarioEndpoint.create(
+                new FixedTransport(local),
+                sender,
+                remote,
+                SipTimerConfig.DEFAULT,
+                new DialogLifecycleListener() {
+                },
+                (transaction, response, context) -> {
+                },
+                (transaction, request, context) -> {
+                },
+                (transaction, response, context) -> {
+                },
+                (transaction, request, context) -> callbacks.incrementAndGet(),
+                null
+        );
+        try {
+            inbound.bind(endpoint.dispatcher());
+            endpoint.close();
+
+            inbound.onMessage(new InboundSipMessage(
+                    optionsRequest(),
+                    new TransportContext(TransportProtocol.UDP, local.address(), remote.address())
+            ));
+
+            assertTrue(callbacks.get() == 0);
+            assertTrue(endpoint.nonInviteTransactions().activeServerTransactions() == 0);
+        } finally {
+            endpoint.close();
+        }
     }
 
     private static SipRequest optionsRequest() {
