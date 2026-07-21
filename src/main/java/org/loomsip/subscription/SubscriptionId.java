@@ -75,6 +75,47 @@ public record SubscriptionId(String callId, String localTag, String remoteTag, E
         );
     }
 
+    /**
+     * Derives the local UAS refer-subscription identity from an in-dialog REFER.
+     *
+     * <p>RFC 3515 implicit subscriptions always use the {@code refer} event
+     * package. The incoming To tag is already the local Dialog tag, so no new
+     * identity may be generated for the resulting NOTIFY sequence.</p>
+     *
+     * @param request inbound in-dialog REFER request
+     * @return local UAS refer-subscription identity
+     * @throws SipHeaderValueException if dialog correlation headers are absent or malformed
+     */
+    public static SubscriptionId fromIncomingRefer(SipRequest request) throws SipHeaderValueException {
+        Objects.requireNonNull(request, "request");
+        return fromIncomingRefer(request, SipHeaderValues.toTag(request.headers()).orElseThrow(
+                () -> new SipHeaderValueException("REFER is missing local To tag")
+        ));
+    }
+
+    /**
+     * Derives a local UAS refer-subscription identity with an explicit local tag.
+     *
+     * <p>Out-of-dialog REFER has no incoming To tag. Its UAS must generate the
+     * final response tag before it can establish the implicit subscription.</p>
+     *
+     * @param request inbound REFER request
+     * @param localTag existing in-dialog tag or newly generated UAS tag
+     * @return local UAS refer-subscription identity
+     * @throws SipHeaderValueException if correlation headers are absent or malformed
+     */
+    public static SubscriptionId fromIncomingRefer(SipRequest request, String localTag) throws SipHeaderValueException {
+        Objects.requireNonNull(request, "request");
+        return new SubscriptionId(
+                SipHeaderValues.callId(request.headers()),
+                requireText(localTag, "localTag"),
+                SipHeaderValues.fromTag(request.headers()).orElseThrow(
+                        () -> new SipHeaderValueException("REFER is missing remote From tag")
+                ),
+                new EventHeaderValue("refer", java.util.Optional.empty())
+        );
+    }
+
     private static String requireText(String value, String name) {
         value = Objects.requireNonNull(value, name);
         if (value.isBlank() || value.chars().anyMatch(Character::isWhitespace)) {

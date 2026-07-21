@@ -2,6 +2,7 @@ package org.loomsip.subscription;
 
 import org.loomsip.message.SipRequest;
 import org.loomsip.message.SipResponse;
+import org.loomsip.message.header.SipHeaderValues;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -32,6 +33,14 @@ public final class SubscriptionSubscribeResponseRouter {
             return CompletableFuture.completedFuture(Optional.empty());
         }
         try {
+            if (SipHeaderValues.toTag(request.headers()).isPresent()) {
+                SubscriptionId id = SubscriptionId.fromSubscribeResponse(request, response);
+                SubscriptionHandle handle = subscriptions.find(id).orElseThrow(
+                        () -> new IllegalArgumentException("unknown Subscription refresh: " + id)
+                );
+                return subscriptions.refresh(id, SipHeaderValues.expires(response.headers()))
+                        .thenApply(snapshot -> Optional.of(handle));
+            }
             return CompletableFuture.completedFuture(Optional.of(
                     subscriptions.create(SubscriptionId.fromSubscribeResponse(request, response))
             ));

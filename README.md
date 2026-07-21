@@ -166,7 +166,7 @@ org.loomsip
 3. **Dialog 与基本呼叫（已完成）**：Early/Confirmed Dialog，以及 INVITE、ACK、re-INVITE、BYE、CANCEL 完整流程。
 4. **可靠传输（已完成，5A～5F）**：TCP/TLS 分帧、连接复用、TLS 握手、统一协议选择、失败传播、连接级资源限制和真实完整呼叫验收。
 5. **认证与 SIP 扩展（6A～6G 已完成）**：请求尝试基础、UAC/UAS Digest、PRACK/100rel、UPDATE、Session Timer、INFO 完整分派，以及跨 Transport 场景、关闭和迟到事件收敛验收。
-6. **订阅与事件框架（第七阶段，7A～7E 已完成）**：SUBSCRIBE/NOTIFY、Subscription Mailbox、Expires、事件分派、UAS 最终 NOTIFY；REFER event package 与跨 Transport 场景待完成。
+6. **订阅与事件框架（第七阶段，已完成）**：SUBSCRIBE/NOTIFY、Subscription Mailbox、Expires、事件分派、UAS 最终 NOTIFY、REFER event package，以及 UDP/TCP/TLS REFER、UAC SUBSCRIBE、refresh/cancel、Timer replacement 和关闭场景。
 7. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
 
 ## 文档

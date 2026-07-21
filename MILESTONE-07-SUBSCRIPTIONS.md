@@ -6,7 +6,7 @@
 
 本阶段建立通用 Subscription 框架。目标不是仅透传 `SUBSCRIBE` 与 `NOTIFY`，而是定义可独立于 Dialog 生命周期存在的订阅状态、过期 Timer、事件分派和关闭收敛规则。
 
-实施状态：7A～7E 已完成组件级实现与确定性测试（2026-07-21）；7F REFER event package 与 7G UDP/TCP/TLS 端到端验收待执行。
+实施状态：第七阶段已完成（7A～7G，2026-07-21）。
 
 ## 2. 并发与所有权
 
@@ -121,8 +121,13 @@ NEW -> PENDING -> ACTIVE -> TERMINATED
 
 ### 4.6 7F：REFER event package
 
-- 在通用 Subscription 框架之上实现 `refer` package。
-- 支持 `Refer-To`、`Refer-Sub`、`message/sipfrag` NOTIFY 和 refer subscription 终止。
+- 已增加 `ReferToHeaderValue` 和 `ReferSubHeaderValue`。`Refer-To` 使用既有结构化 name-addr 解析；`Refer-Sub` 缺失时按照 RFC 4488 默认 `true`，重复或非 boolean 值在 Header 边界拒绝。
+- 已增加 `SipfragStatus`：仅接受 CRLF 结尾的 `SIP/2.0 <100-699> <reason>` status line，并可无损生成最小 `message/sipfrag` Body。
+- 已增加 `ReferNotifier`。它仅接受无 event-id 的 `Event: refer` Subscription，受管 `Content-Type: message/sipfrag`，并强制 sipfrag 的终态性与 `Subscription-State: terminated` 一致；Via、CSeq、identity 和 NICT 仍由 `SubscriptionPublisher` 管理。
+- 已增加 `ReferRequest`、`ReferHandler` 和 `ReferServerListener`。Listener 只截获 REFER，解析失败返回 400，Handler 异常或空结果返回 500，其他 Non-INVITE Method 原样委派。
+- Handler 返回 2xx 且 `Refer-Sub: true` 时，Listener 使用 REFER 已有的 To/From tag 创建并激活 `Event: refer` 的隐式 Subscription，提交 2xx 后通过 `ReferSubscriptionListener` 将只读 Handle、Refer-To 和 TransportContext 交给 TU 建立初始通知。`Refer-Sub: false` 只返回 REFER 响应，不创建隐式 Subscription。
+- 已增加 `ReferSubscriptionPublisher` 与不可变 `ReferSubscriptionProfile`。每个隐式 refer Subscription 有一个有界发布 Mailbox，拥有 NOTIFY CSeq 与一次终态发布标记；它调用 `ReferNotifier` 启动 NICT，但通过 `SubscriptionManager` 完成生命周期终止。
+- 非终态 sipfrag 发送 `Subscription-State: active`；终态 sipfrag 发送 `terminated;reason=noresource`，成功启动后终止 Subscription。终态构造失败以 `TRANSPORT_FAILURE` 清理，Subscription/stack 关闭会关闭发布器并使迟到进度失败。已覆盖排队双终态只启动一个 NOTIFY 的竞态。
 - 不在本阶段实现 Proxy、B2BUA 或业务侧呼叫转移策略。
 
 ### 4.7 7G：跨 Transport 验收
@@ -135,6 +140,14 @@ NEW -> PENDING -> ACTIVE -> TERMINATED
 | UDP Timer 重传 | 完整 | 不适用 | 不适用 |
 | REFER event package | 完整 | 完整 | 完整 |
 | close / 迟到事件 | 一条确定性场景 | 不重复 | 不重复 |
+
+已实现 7G-A～7G-C：真实 UDP、TCP、TLS 场景覆盖 out-of-dialog `REFER -> 202 Accepted -> 100 Trying NOTIFY -> 200 OK final NOTIFY` 和 `Refer-Sub: false` 仅返回 202、不创建 Subscription/NOTIFY。UAS 为 out-of-dialog REFER 生成 To tag 并建立隐式 Subscription；带 To tag 的 NOTIFY 在 Dialog Bridge 前转交 Subscription/Non-INVITE listener，避免被未知 Dialog 误判为 481。测试在收到初始 sipfrag 后再触发最终业务进度，避免将独立 NICT 的异步连接建立顺序误当作协议保证；另有 UDP 确定性关闭场景验证初始通知后 Stack 关闭会拒绝迟到终态进度且不再发送 NOTIFY。
+
+已实现 7G-D：真实 UDP、TCP、TLS 场景覆盖通用 UAC `SUBSCRIBE -> 202 -> Subscription-State: active NOTIFY -> Subscription-State: terminated NOTIFY`。测试通过 `SubscriptionSubscribeClientListener` 在 2xx 回调前创建 UAC identity，再由 `SubscriptionNotifyServerListener` 返回 200 并驱动 pending/active/terminated Mailbox 转换。UAS 发送 NOTIFY 时使用与 UAC 相反的本地/远端 tag 视角，确保 RFC 3265 identity 关联正确。
+
+已实现 7G-E：新增 `SubscriptionRefreshRequest` 与 `SubscriptionClient.refresh(...)`，以既有 Call-ID、双方 tag 和 Event 构造 in-dialog refresh 或 `Expires: 0` cancellation。成功的带 To tag SUBSCRIBE 响应由 `SubscriptionSubscribeResponseRouter` 识别为 refresh，使用协商 Expires 更新 Timer；真实 UDP、TCP、TLS 场景验证 `Expires: 0` 2xx 后进入 `LOCAL_CANCELLED`，且不依赖额外 NOTIFY。
+
+已实现 7G-F～7G-G：真实 UDP refresh 场景验证 Timer replacement，先后协商 30/60 秒时旧 deadline 不会终止 Subscription，只有最新 deadline 进入 `EXPIRED`；另有 UDP close 场景在 UAC Manager 关闭后发送迟到 NOTIFY，验证返回 `481`、保持 `MANAGER_CLOSED` 终态且不隐式重建 identity。至此 7G 验收矩阵全部覆盖。
 
 ## 5. 错误与安全边界
 

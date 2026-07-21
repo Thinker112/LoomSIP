@@ -10,6 +10,8 @@ public enum SubscriptionTerminationReason {
     EXPIRED,
     /** UAS setup failed before a successful SUBSCRIBE response was sent. */
     SETUP_FAILED,
+    /** Local application completed an event package and sent its final notification. */
+    LOCAL_COMPLETED,
     /** Transaction or transport failure made the subscription unusable. */
     TRANSPORT_FAILURE,
     /** Owning SubscriptionManager closed. */

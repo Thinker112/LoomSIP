@@ -1042,6 +1042,11 @@ public final class DialogTransactionBridge {
                 SipRequest request,
                 TransportContext context
         ) {
+            // RFC 3265 subscription correlation belongs to SubscriptionManager, not DialogManager.
+            if (SipMethod.NOTIFY.equals(request.method()) || SipMethod.SUBSCRIBE.equals(request.method())) {
+                nonInviteServerDelegate.onRequest(transaction, request, context);
+                return;
+            }
             SessionTimerNegotiator.NegotiatedSessionTimer sessionNegotiation = null;
             try {
                 if (SipMethod.UPDATE.equals(request.method())

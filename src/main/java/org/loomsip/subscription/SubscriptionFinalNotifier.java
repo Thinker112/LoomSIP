@@ -98,7 +98,7 @@ public final class SubscriptionFinalNotifier implements SubscriptionTerminationL
             case EXPIRED -> Optional.of(new SubscriptionStateHeaderValue(
                     SubscriptionState.TERMINATED, Optional.of("timeout"), Optional.empty(), Optional.empty()
             ));
-            case REMOTE_TERMINATED, SETUP_FAILED, TRANSPORT_FAILURE, MANAGER_CLOSED -> Optional.empty();
+            case REMOTE_TERMINATED, SETUP_FAILED, LOCAL_COMPLETED, TRANSPORT_FAILURE, MANAGER_CLOSED -> Optional.empty();
         });
     }
 }

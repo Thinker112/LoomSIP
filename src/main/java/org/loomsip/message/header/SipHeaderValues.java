@@ -287,6 +287,40 @@ public final class SipHeaderValues {
         }
     }
 
+    /**
+     * Parses the required RFC 3515 Refer-To target.
+     *
+     * @param headers SIP message headers
+     * @return structured referral target
+     * @throws SipHeaderValueException if Refer-To is missing, duplicated, or malformed
+     */
+    public static ReferToHeaderValue referTo(SipHeaders headers) throws SipHeaderValueException {
+        return ReferToHeaderValue.parse(requiredSingleValue(headers, "Refer-To"));
+    }
+
+    /**
+     * Parses RFC 4488 Refer-Sub, returning its required default when absent.
+     *
+     * @param headers SIP message headers
+     * @return explicit or default implicit-subscription preference
+     * @throws SipHeaderValueException if Refer-Sub is duplicated or malformed
+     */
+    public static ReferSubHeaderValue referSub(SipHeaders headers) throws SipHeaderValueException {
+        Objects.requireNonNull(headers, "headers");
+        List<SipHeader> values = headers.all("Refer-Sub");
+        if (values.isEmpty()) {
+            return ReferSubHeaderValue.DEFAULT;
+        }
+        if (values.size() != 1) {
+            throw new SipHeaderValueException("duplicate Refer-Sub headers");
+        }
+        try {
+            return ReferSubHeaderValue.parse(values.getFirst().value());
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Refer-Sub header", exception);
+        }
+    }
+
     /** Parses one RFC 3265 Subscription-State header. */
     public static SubscriptionStateHeaderValue subscriptionState(SipHeaders headers) throws SipHeaderValueException {
         String value = requiredSingleValue(headers, "Subscription-State").strip();

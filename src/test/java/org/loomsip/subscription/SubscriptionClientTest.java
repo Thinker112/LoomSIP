@@ -94,6 +94,40 @@ class SubscriptionClientTest {
         }
     }
 
+    @Test
+    void buildsManagedInDialogRefresh() throws Exception {
+        TransportEndpoint local = TransportEndpoint.udp(new InetSocketAddress(InetAddress.getLoopbackAddress(), 5070));
+        TransportEndpoint remote = TransportEndpoint.udp(new InetSocketAddress(InetAddress.getLoopbackAddress(), 5071));
+        AtomicReference<SipRequest> sent = new AtomicReference<>();
+        VirtualSipScheduler scheduler = new VirtualSipScheduler();
+        try (NonInviteTransactionManager transactions = new NonInviteTransactionManager(
+                (message, target) -> {
+                    sent.set((SipRequest) message);
+                    return CompletableFuture.completedFuture(new SendResult(local, target, 1));
+                }, SipTimerConfig.DEFAULT, NonInviteTransactionConfig.DEFAULT,
+                (transaction, response, context) -> { }, (transaction, request, context) -> { },
+                scheduler, Runnable::run, Runnable::run
+        )) {
+            SubscriptionClient client = new SubscriptionClient(transactions,
+                    new SubscriptionRequestProfile(ViaTransport.UDP, new SentBy("client.example.com", 5070),
+                            TransportProtocol.UDP, true), () -> "z9hG4bK-refresh");
+            client.refresh(new SubscriptionRefreshRequest(
+                    new SubscriptionId("subscription@example.com", "local-tag", "remote-tag",
+                            new EventHeaderValue("presence", Optional.empty())),
+                    SipUri.parse("sip:bob@example.com"), SipUri.parse("sip:alice@example.com"),
+                    SipUri.parse("sip:bob@example.com"), 2, new ExpiresHeaderValue(0),
+                    SipHeaders.empty(), SipBody.empty(), remote
+            ));
+
+            assertEquals("<sip:alice@example.com>;tag=local-tag", sent.get().headers().firstValue("From").orElseThrow());
+            assertEquals("<sip:bob@example.com>;tag=remote-tag", sent.get().headers().firstValue("To").orElseThrow());
+            assertEquals("2 SUBSCRIBE", sent.get().headers().firstValue("CSeq").orElseThrow());
+            assertEquals("0", sent.get().headers().firstValue("Expires").orElseThrow());
+        } finally {
+            scheduler.close();
+        }
+    }
+
     private static InitialSubscriptionRequest request(TransportEndpoint target) {
         return new InitialSubscriptionRequest(
                 SipUri.parse("sip:bob@example.com"), SipUri.parse("sip:alice@example.com"),
