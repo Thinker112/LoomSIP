@@ -608,6 +608,65 @@ Dialog Bridge -- Dialog Mailbox --> identity / CSeq validation
 
 ## 12. 6G：完整场景和验收
 
+实施状态：进行中。6G-A 已完成（2026-07-21）；6G-B～6G-F 待执行。本阶段不新增生产 Stack API。
+
+### 12.0 实施拆分
+
+```text
+6G-A  测试场景装配基座
+  |
+  +--> 6G-B  Dialog + INFO 跨 UDP/TCP/TLS
+  |
+  +--> 6G-C  Digest 跨 UDP/TCP/TLS
+  |
+  +--> 6G-D  PRACK / Session Timer 组合
+  |
+  +--> 6G-E  并发、资源与关闭
+  |
+  v
+6G-F  汇总验收和文档
+```
+
+#### 6G-A：测试场景装配基座
+
+- 已在 `src/test/java/org/loomsip/testkit` 提供 `ScenarioEndpoint`、可延迟绑定的入站 Handler 和双端 Transport 生命周期 helper。
+- Endpoint 只装配现有 `SipTransport`、Transaction Manager、Dialog Manager、Dialog Bridge、可选 `InfoDispatcher` 与虚拟 Scheduler；未在 `src/main` 增加 Stack facade。
+- 每个具体场景仍显式创建 UDP/TCP/TLS Transport、TLS 证书、业务 Listener、认证 Gate/Exchange 和远端路由，避免测试基座隐藏协议条件。
+- 所有 Endpoint 关闭时按 Dialog、Transaction、Scheduler、Executor 顺序释放资源；Transport pair 独立拥有 Socket/Netty 生命周期。
+- 已验证：基座可将入站消息交给 Transaction Dispatcher，Transport pair 在关闭时释放两端资源。
+
+#### 6G-B：Dialog + INFO 跨 Transport
+
+- UDP、TCP、TLS 都完成 INVITE 建立 Dialog 后的 packaged INFO。
+- 覆盖 Handler 200、未知 package `469 + Recv-Info`，以及 CSeq、Route、Body、Header 保留。
+
+#### 6G-C：Digest 跨 Transport
+
+- UDP、TCP、TLS 上完成真实 401 Challenge、新 Attempt 与成功响应。
+- 验证 branch/CSeq 更新，Call-ID、Tag、Route 和 Body 保持；407 使用外部 Proxy 风格测试模拟。
+
+#### 6G-D：PRACK / Session Timer 组合
+
+- 三种 Transport 覆盖 100rel 的成功 183 + PRACK + 200 流程。
+- 仅 UDP 覆盖丢失可靠临时响应或 PRACK 的重传；可靠 Transport 不重复验证 UDP 重传语义。
+- Session Timer 覆盖协商、UPDATE 刷新、422 重试和过期清理；Timer 一律由虚拟时间推进。
+
+#### 6G-E：并发、资源与关闭
+
+- 注入同一 Dialog 的超时、Transport failure、认证或刷新完成竞争，验证只完成一次。
+- 验证关闭后的 Future 最终完成，迟到事件不能复活 Transaction、Dialog 或 Exchange 状态。
+
+#### 6G-F：汇总验收
+
+| 场景 | UDP | TCP | TLS |
+| --- | --- | --- | --- |
+| Dialog + INFO | 完整 | 完整 | 完整 |
+| Digest 401/重试 | 完整 | 完整 | 完整 |
+| PRACK 成功路径 | 完整 | 完整 | 完整 |
+| PRACK 丢失/重传 | 完整 | 不适用 | 不适用 |
+| Session Timer 刷新 | 完整 | 完整 | 完整 |
+| Session Timer 422/并发故障 | 一条确定性场景 | 不重复 | 不重复 |
+
 ### 12.1 Digest
 
 - UDP、TCP、TLS 上的 401 Challenge 和成功重试。
