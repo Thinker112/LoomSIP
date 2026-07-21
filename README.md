@@ -32,6 +32,7 @@ LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协
 | UAS Digest Authentication | 已实现（6C） | 401 Gate、预计算 HA1、Nonce TTL、`stale=true`、原子 `nc` 重放保护及 Dialog/TU 前置拦截 |
 | PRACK / 100rel | 已实现（6D） | RSeq/RAck、可靠临时响应重传、PRACK 自动创建、Early Dialog 隔离和 420/481 错误语义 |
 | UPDATE / Session Timer | 已实现（6E） | UPDATE、Session-Expires/Min-SE、UAC/UAS 协商、generation-safe Timer、422 单次重试和刷新失败闭环 |
+| INFO Header Model | 进行中（6F-A 已完成） | `Info-Package`、`Recv-Info` 结构化解析与能力列表渲染已完成；Dispatcher 与 `sendInfo` API 待实现 |
 | Stack API | 后续规划 | 统一组件装配、配置和关闭顺序 |
 
 当前 `SipMessageParser` 接收一条已经完成边界识别的 SIP 报文。TCP 半包、粘包以及同一字节流中的多条消息，已经由 Transport stream decoder 完成分帧。
@@ -163,7 +164,7 @@ org.loomsip
 2. **事务层（已完成）**：Transaction ID、Mailbox、Dispatcher、四类状态机、Timer、ACK/CANCEL 关联规则。
 3. **Dialog 与基本呼叫（已完成）**：Early/Confirmed Dialog，以及 INVITE、ACK、re-INVITE、BYE、CANCEL 完整流程。
 4. **可靠传输（已完成，5A～5F）**：TCP/TLS 分帧、连接复用、TLS 握手、统一协议选择、失败传播、连接级资源限制和真实完整呼叫验收。
-5. **认证与 SIP 扩展（6A～6E 已完成，6F～6G 待执行）**：请求尝试基础、UAC/UAS Digest、PRACK/100rel、UPDATE 和 Session Timer；后续实现 INFO 与完整场景验收，完整 REFER 与事件框架后置。
+5. **认证与 SIP 扩展（6A～6E、6F-A 已完成，6F-B～6G 待执行）**：请求尝试基础、UAC/UAS Digest、PRACK/100rel、UPDATE、Session Timer 和 INFO Header 模型；后续实现 INFO Dispatcher 与完整场景验收，完整 REFER 与事件框架后置。
 6. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
 
 ## 文档

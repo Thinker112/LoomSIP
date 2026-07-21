@@ -207,6 +207,48 @@ public final class SipHeaderValues {
         }
     }
 
+    /**
+     * Parses one RFC 6086 Info-Package header.
+     *
+     * @param headers SIP message headers
+     * @return typed INFO package token
+     * @throws SipHeaderValueException if Info-Package is missing, duplicated, or malformed
+     */
+    public static InfoPackageHeaderValue infoPackage(SipHeaders headers) throws SipHeaderValueException {
+        String value = requiredSingleValue(headers, "Info-Package").strip();
+        try {
+            return new InfoPackageHeaderValue(value);
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Info-Package header", exception);
+        }
+    }
+
+    /**
+     * Parses all RFC 6086 Recv-Info fields as one ordered capability list.
+     *
+     * @param headers SIP message headers
+     * @return typed advertised INFO packages
+     * @throws SipHeaderValueException if Recv-Info is missing, empty, duplicated, or malformed
+     */
+    public static RecvInfoHeaderValue recvInfo(SipHeaders headers) throws SipHeaderValueException {
+        Objects.requireNonNull(headers, "headers");
+        List<InfoPackageHeaderValue> packages = new ArrayList<>();
+        List<SipHeader> fields = headers.all("Recv-Info");
+        if (fields.isEmpty()) {
+            throw new SipHeaderValueException("missing Recv-Info header");
+        }
+        try {
+            for (SipHeader field : fields) {
+                for (String item : field.value().split(",", -1)) {
+                    packages.add(new InfoPackageHeaderValue(item.strip()));
+                }
+            }
+            return new RecvInfoHeaderValue(packages);
+        } catch (IllegalArgumentException exception) {
+            throw new SipHeaderValueException("invalid Recv-Info header", exception);
+        }
+    }
+
     private static ViaHeaderValue parseVia(String value) throws SipHeaderValueException {
         String stripped = value.strip();
         int whitespace = firstWhitespace(stripped);
