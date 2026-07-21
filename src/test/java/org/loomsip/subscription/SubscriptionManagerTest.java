@@ -4,6 +4,10 @@ import org.junit.jupiter.api.Test;
 import org.loomsip.message.header.EventHeaderValue;
 import org.loomsip.message.header.SubscriptionState;
 import org.loomsip.message.header.SubscriptionStateHeaderValue;
+import org.loomsip.message.header.ExpiresHeaderValue;
+import org.loomsip.transaction.timer.VirtualSipScheduler;
+
+import java.time.Duration;
 
 import java.util.Optional;
 
@@ -64,6 +68,32 @@ class SubscriptionManagerTest {
         assertEquals(Optional.of(SubscriptionTerminationReason.REMOTE_TERMINATED), handle.snapshot().terminationReason());
         assertEquals(0, manager.size());
         assertThrows(IllegalArgumentException.class, () -> manager.onNotify(id, state(SubscriptionState.ACTIVE)));
+    }
+
+    @Test
+    void refreshReplacesExpiryGenerationAndZeroCancelsSubscription() {
+        VirtualSipScheduler scheduler = new VirtualSipScheduler();
+        try {
+            SubscriptionManager manager = new SubscriptionManager(
+                    SubscriptionConfig.DEFAULT, Runnable::run, failure -> { throw new AssertionError(failure); }, scheduler
+            );
+            SubscriptionId id = id("presence", Optional.empty());
+            SubscriptionHandle handle = manager.create(id);
+            manager.refresh(id, new ExpiresHeaderValue(120)).toCompletableFuture().join();
+            manager.refresh(id, new ExpiresHeaderValue(180)).toCompletableFuture().join();
+
+            scheduler.advanceBy(Duration.ofSeconds(120));
+            assertEquals(SubscriptionLifecycleState.PENDING, handle.snapshot().state());
+            scheduler.advanceBy(Duration.ofSeconds(60));
+            assertEquals(SubscriptionTerminationReason.EXPIRED, handle.snapshot().terminationReason().orElseThrow());
+
+            SubscriptionId cancelledId = id("refer", Optional.empty());
+            SubscriptionHandle cancelled = manager.create(cancelledId);
+            manager.refresh(cancelledId, new ExpiresHeaderValue(0)).toCompletableFuture().join();
+            assertEquals(SubscriptionTerminationReason.LOCAL_CANCELLED, cancelled.snapshot().terminationReason().orElseThrow());
+        } finally {
+            scheduler.close();
+        }
     }
 
     private static SubscriptionId id(String event, Optional<String> eventId) {

@@ -2,6 +2,9 @@ package org.loomsip.subscription;
 
 import org.loomsip.concurrent.SerialMailbox;
 import org.loomsip.message.header.SubscriptionStateHeaderValue;
+import org.loomsip.message.header.ExpiresHeaderValue;
+import org.loomsip.transaction.timer.Cancellable;
+import org.loomsip.transaction.timer.SipScheduler;
 
 import java.util.Map;
 import java.util.Objects;
@@ -28,14 +31,26 @@ public final class SubscriptionManager implements AutoCloseable {
     private final SubscriptionConfig config;
     private final Executor executor;
     private final Consumer<? super Throwable> failureListener;
+    private final SipScheduler scheduler;
     private final Map<SubscriptionId, Subscription> subscriptions = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
 
     /** Creates a manager with explicit capacity, execution, and failure dependencies. */
     public SubscriptionManager(SubscriptionConfig config, Executor executor, Consumer<? super Throwable> failureListener) {
+        this(config, executor, failureListener, null);
+    }
+
+    /** Creates a manager with an externally owned scheduler for Subscription Expires timers. */
+    public SubscriptionManager(
+            SubscriptionConfig config,
+            Executor executor,
+            Consumer<? super Throwable> failureListener,
+            SipScheduler scheduler
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.failureListener = Objects.requireNonNull(failureListener, "failureListener");
+        this.scheduler = scheduler;
     }
 
     /** Creates or returns the pending Subscription for one stable identity. */
@@ -77,6 +92,11 @@ public final class SubscriptionManager implements AutoCloseable {
         return require(id).onNotify(Objects.requireNonNull(state, "state"));
     }
 
+    /** Refreshes one Subscription expiry or terminates it when Expires is zero. */
+    public CompletionStage<SubscriptionSnapshot> refresh(SubscriptionId id, ExpiresHeaderValue expires) {
+        return require(id).refresh(Objects.requireNonNull(expires, "expires"));
+    }
+
     /** Terminates one Subscription and removes it after mailbox cleanup. */
     public CompletionStage<Void> terminate(SubscriptionId id, SubscriptionTerminationReason reason) {
         return require(id).terminate(Objects.requireNonNull(reason, "reason"));
@@ -114,6 +134,8 @@ public final class SubscriptionManager implements AutoCloseable {
         private final SerialMailbox<Event> mailbox;
         private final CompletableFuture<Void> terminated = new CompletableFuture<>();
         private volatile SubscriptionSnapshot snapshot;
+        private Cancellable expiryTimer;
+        private long expiryGeneration;
 
         private Subscription(SubscriptionId id) {
             this.id = id;
@@ -143,6 +165,12 @@ public final class SubscriptionManager implements AutoCloseable {
             return result.minimalCompletionStage();
         }
 
+        private CompletionStage<SubscriptionSnapshot> refresh(ExpiresHeaderValue expires) {
+            CompletableFuture<SubscriptionSnapshot> result = new CompletableFuture<>();
+            submit(new Refresh(expires, result), result);
+            return result.minimalCompletionStage();
+        }
+
         private void handle(Event event) {
             if (event instanceof Activate activate) {
                 if (snapshot.state() == SubscriptionLifecycleState.PENDING) {
@@ -153,6 +181,7 @@ public final class SubscriptionManager implements AutoCloseable {
                 }
             } else if (event instanceof Terminate terminate) {
                 if (snapshot.state() != SubscriptionLifecycleState.TERMINATED) {
+                    cancelExpiry();
                     snapshot = new SubscriptionSnapshot(id, SubscriptionLifecycleState.TERMINATED, Optional.of(terminate.reason()));
                     subscriptions.remove(id, this);
                     terminated.complete(null);
@@ -172,6 +201,7 @@ public final class SubscriptionManager implements AutoCloseable {
                             id, SubscriptionLifecycleState.ACTIVE, Optional.empty()
                     );
                     case TERMINATED -> {
+                        cancelExpiry();
                         snapshot = new SubscriptionSnapshot(
                                 id,
                                 SubscriptionLifecycleState.TERMINATED,
@@ -183,6 +213,35 @@ public final class SubscriptionManager implements AutoCloseable {
                     }
                 }
                 notify.result().complete(snapshot);
+            } else if (event instanceof Refresh refresh) {
+                if (snapshot.state() == SubscriptionLifecycleState.TERMINATED) {
+                    refresh.result().completeExceptionally(new IllegalStateException("Subscription is terminated"));
+                } else if (refresh.expires().seconds() == 0) {
+                    cancelExpiry();
+                    snapshot = new SubscriptionSnapshot(id, SubscriptionLifecycleState.TERMINATED,
+                            Optional.of(SubscriptionTerminationReason.LOCAL_CANCELLED));
+                    subscriptions.remove(id, this);
+                    terminated.complete(null);
+                    mailbox.close();
+                    refresh.result().complete(snapshot);
+                } else if (scheduler == null) {
+                    refresh.result().completeExceptionally(new IllegalStateException("Subscription scheduler is not configured"));
+                } else {
+                    cancelExpiry();
+                    long generation = ++expiryGeneration;
+                    expiryTimer = scheduler.schedule(java.time.Duration.ofSeconds(refresh.expires().seconds()),
+                            () -> submitExpiry(generation));
+                    refresh.result().complete(snapshot);
+                }
+            } else if (event instanceof ExpiryElapsed elapsed) {
+                if (snapshot.state() != SubscriptionLifecycleState.TERMINATED && elapsed.generation() == expiryGeneration) {
+                    expiryTimer = null;
+                    snapshot = new SubscriptionSnapshot(id, SubscriptionLifecycleState.TERMINATED,
+                            Optional.of(SubscriptionTerminationReason.EXPIRED));
+                    subscriptions.remove(id, this);
+                    terminated.complete(null);
+                    mailbox.close();
+                }
             }
         }
 
@@ -190,13 +249,27 @@ public final class SubscriptionManager implements AutoCloseable {
             try { mailbox.submit(event); } catch (Throwable cause) { result.completeExceptionally(cause); }
         }
 
-        private sealed interface Event permits Activate, Terminate, Notify { }
+        private void submitExpiry(long generation) {
+            try { mailbox.submit(new ExpiryElapsed(generation)); } catch (RuntimeException ignored) { }
+        }
+
+        private void cancelExpiry() {
+            if (expiryTimer != null) {
+                expiryTimer.cancel();
+                expiryTimer = null;
+            }
+            expiryGeneration++;
+        }
+
+        private sealed interface Event permits Activate, Terminate, Notify, Refresh, ExpiryElapsed { }
         private record Activate(CompletableFuture<SubscriptionSnapshot> result) implements Event { }
         private record Terminate(SubscriptionTerminationReason reason, CompletableFuture<Void> result) implements Event { }
         private record Notify(
                 SubscriptionStateHeaderValue state,
                 CompletableFuture<SubscriptionSnapshot> result
         ) implements Event { }
+        private record Refresh(ExpiresHeaderValue expires, CompletableFuture<SubscriptionSnapshot> result) implements Event { }
+        private record ExpiryElapsed(long generation) implements Event { }
     }
 
     private void reportFailure(Throwable cause) {

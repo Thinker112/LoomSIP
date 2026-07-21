@@ -4,6 +4,8 @@ import org.loomsip.message.header.EventHeaderValue;
 import org.loomsip.message.SipHeaders;
 import org.loomsip.message.header.SipHeaderValueException;
 import org.loomsip.message.header.SipHeaderValues;
+import org.loomsip.message.SipRequest;
+import org.loomsip.message.SipResponse;
 
 import java.util.Objects;
 
@@ -39,6 +41,37 @@ public record SubscriptionId(String callId, String localTag, String remoteTag, E
                         () -> new SipHeaderValueException("NOTIFY is missing remote From tag")
                 ),
                 SipHeaderValues.event(headers)
+        );
+    }
+
+    /** Derives the local UAC identity after a successful initial SUBSCRIBE response. */
+    public static SubscriptionId fromSubscribeResponse(SipRequest request, SipResponse response)
+            throws SipHeaderValueException {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(response, "response");
+        return new SubscriptionId(
+                SipHeaderValues.callId(request.headers()),
+                SipHeaderValues.fromTag(request.headers()).orElseThrow(
+                        () -> new SipHeaderValueException("SUBSCRIBE is missing local From tag")
+                ),
+                SipHeaderValues.toTag(response.headers()).orElseThrow(
+                        () -> new SipHeaderValueException("SUBSCRIBE response is missing remote To tag")
+                ),
+                SipHeaderValues.event(request.headers())
+        );
+    }
+
+    /** Derives one local UAS identity from an accepted initial SUBSCRIBE and generated local To tag. */
+    public static SubscriptionId fromIncomingSubscribe(SipRequest request, String localTag)
+            throws SipHeaderValueException {
+        Objects.requireNonNull(request, "request");
+        return new SubscriptionId(
+                SipHeaderValues.callId(request.headers()),
+                requireText(localTag, "localTag"),
+                SipHeaderValues.fromTag(request.headers()).orElseThrow(
+                        () -> new SipHeaderValueException("SUBSCRIBE is missing remote From tag")
+                ),
+                SipHeaderValues.event(request.headers())
         );
     }
 

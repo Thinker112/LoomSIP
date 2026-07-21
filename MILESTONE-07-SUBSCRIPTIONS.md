@@ -92,7 +92,10 @@ NEW -> PENDING -> ACTIVE -> TERMINATED
 ### 4.3 7C：UAC SUBSCRIBE 与入站 NOTIFY
 
 - 已在 `SubscriptionManager` 增加已关联 NOTIFY 的生命周期入口：pending/active 更新对应 Subscription Snapshot，`terminated` 单向清理 identity；已移除 identity 的迟到 NOTIFY 不会隐式重建 Subscription。
-- 已增加 `SubscriptionNotifyRouter`：从入站 NOTIFY 的 Call-ID、From/To tag 和 Event 派生本地 identity，校验 Subscription-State，并选择 `200`、`400` 或未知 Subscription 的 `481` 响应。Transaction listener 接线仍待实现。
+- 已增加 `SubscriptionNotifyRouter`：从入站 NOTIFY 的 Call-ID、From/To tag 和 Event 派生本地 identity，校验 Subscription-State，并选择 `200`、`400` 或未知 Subscription 的 `481` 响应。
+- 已增加 `SubscriptionNotifyServerListener`，可作为 NIST Server Listener adapter 接入 Transaction 层；仅截获 NOTIFY 并在协议 callback executor 上发送 Router 响应，其他 Non-INVITE Method 原样委派下游。
+- 已增加 `SubscriptionSubscribeResponseRouter` 与 NICT Client Listener adapter：成功初始 SUBSCRIBE 响应使用请求 From tag、响应 To tag 和 Event 创建 pending UAC Subscription；provisional/non-2xx 响应不创建，缺失远端 To tag 的 2xx 作为关联失败处理。
+- 已增加 `InitialSubscriptionRequest`、`SubscriptionRequestProfile` 与 `SubscriptionClient`，可构建并启动初始 out-of-dialog SUBSCRIBE NICT；Client 受管 Via、From、To、Call-ID、CSeq、Event、Expires，拒绝调用方覆盖。Dialog 内 SUBSCRIBE 的 CSeq/Route 接入留待后续扩展。
 - `SubscriptionClient.subscribe(...)` 创建初始 Transaction；Dialog 内调用通过 Dialog Mailbox 分配 CSeq 和 Route。
 - 处理 SUBSCRIBE 2xx、失败响应、refresh 与 `Expires: 0` 取消。
 - 按 Subscription ID 路由 NOTIFY，先验证 Event package、Dialog 关联与 CSeq，再向 TU 分发事件 Body。
@@ -100,7 +103,9 @@ NEW -> PENDING -> ACTIVE -> TERMINATED
 
 ### 4.4 7D：UAS Dispatcher 与事件发布
 
-- `SubscriptionDispatcher` 按规范化 Event package 注册线程安全 `SubscriptionHandler`。
+- 已实现线程安全 `SubscriptionDispatcher`，按规范化 Event package 注册 `SubscriptionHandler`，并解析 SUBSCRIBE 的 Event/Expires 后选择 Handler；未知 package 保持未匹配，由后续 Server Listener 决定 SIP 错误响应。
+- 已实现 `SubscriptionSubscribeServerListener`：作为 NIST adapter 解析并调用 Handler，未知 Event 返回 `489 Bad Event`、非法 Header 返回 `400`；Handler 的 2xx 决策创建 UAS pending Subscription，并发送带本地 To tag 与协商 Expires 的最终响应。
+- 已实现 `SubscriptionNotification` 与 `SubscriptionPublisher`，可使用 existing Subscription ID 构建并启动 UAS NOTIFY NICT；Publisher 受管 Via、From/To tag、Call-ID、CSeq、Event、Subscription-State，适合作为初始或后续事件发布的发送边界。
 - Handler 决定接受的 Expires、初始 NOTIFY、后续事件发布与终止。
 - UAS Expires Timer 到期时发送最终 NOTIFY：`Subscription-State: terminated;reason=timeout`。
 - Handler 异常、空 completion 或响应构造失败转换为明确 SIP 错误，日志不得记录敏感 Event Body。
