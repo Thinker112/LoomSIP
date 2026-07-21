@@ -12,7 +12,7 @@
 
 现有 Transaction 表示一次 SIP 请求尝试，Dialog 则拥有跨 Transaction 的 Call-ID、Tag、CSeq、Route Set 和 Remote Target。Digest 认证可能在一个逻辑请求中依次创建未认证和已认证的多个 Transaction；PRACK、UPDATE 和 Session Timer 又需要复用 Dialog 的顺序化状态。因此，本阶段不能把认证重试直接塞入现有 Transaction 状态机，也不能让认证组件绕过 Dialog Mailbox 修改 CSeq。
 
-实施状态：6A～6E 已完成（2026-07-20），6F～6G 待执行。
+实施状态：6A～6F 已完成，6G 正在进行跨 Transport 验收。
 
 ## 2. RFC 范围与必要性
 
@@ -608,7 +608,7 @@ Dialog Bridge -- Dialog Mailbox --> identity / CSeq validation
 
 ## 12. 6G：完整场景和验收
 
-实施状态：进行中。6G-A 已完成（2026-07-21）；6G-B～6G-F 待执行。本阶段不新增生产 Stack API。
+实施状态：进行中。6G-A～6G-C 已完成（2026-07-21）；6G-D～6G-F 待执行。本阶段不新增生产 Stack API。
 
 ### 12.0 实施拆分
 
@@ -637,13 +637,14 @@ Dialog Bridge -- Dialog Mailbox --> identity / CSeq validation
 
 #### 6G-B：Dialog + INFO 跨 Transport
 
-- UDP、TCP、TLS 都完成 INVITE 建立 Dialog 后的 packaged INFO。
-- 覆盖 Handler 200、未知 package `469 + Recv-Info`，以及 CSeq、Route、Body、Header 保留。
+- UDP、TCP、TLS 都已完成 INVITE 建立 Dialog 后的 packaged INFO。
+- 已覆盖注册 Handler 200/Body、未知 package `469 + Recv-Info`、CSeq 连续性和没有回退到传统 Non-INVITE callback；TCP/TLS 场景使用连接感知 sender，TLS 使用受信任测试证书。
 
 #### 6G-C：Digest 跨 Transport
 
-- UDP、TCP、TLS 上完成真实 401 Challenge、新 Attempt 与成功响应。
-- 验证 branch/CSeq 更新，Call-ID、Tag、Route 和 Body 保持；407 使用外部 Proxy 风格测试模拟。
+- 已在 UDP、TCP、TLS 上完成真实 OPTIONS `401 WWW-Authenticate`、UAC 新 Attempt 和最终 `200 OK` 场景。服务端使用预计算 HA1 的 `ServerAuthenticationGate`，客户端通过 `ClientAuthenticationCoordinator` 创建认证重试。
+- 已验证初始未认证请求不会到达应用回调；认证重试使用新 Via branch 和递增 CSeq，同时保留 Call-ID、From/To tag、Route、Content-Type 与 Body。三种传输均通过连接感知 sender；TLS 使用受信任测试证书。
+- 本子阶段尚未覆盖 407、INVITE/REGISTER/BYE/UPDATE 的认证重试，这些仍属于后续组合验收范围。
 
 #### 6G-D：PRACK / Session Timer 组合
 

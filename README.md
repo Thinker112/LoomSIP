@@ -2,7 +2,7 @@
 
 LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协议栈，目标是遵循 RFC 3261 的协议分层与事务语义，并通过 Netty 和 Java 虚拟线程建立清晰、可测试的并发模型。
 
-项目当前处于核心协议栈开发阶段。仓库已经实现不可变 SIP 消息模型、Parser/Encoder、Netty UDP Transport、TCP/TLS 可靠传输、四类 Transaction 状态机、Dialog Layer，以及 INVITE/ACK/re-INVITE/BYE/CANCEL 基本呼叫流程。统一 Stack API、认证和扩展能力仍在后续规划中，因此当前版本暂不适合生产环境使用。
+项目当前处于核心协议栈开发阶段。仓库已经实现不可变 SIP 消息模型、Parser/Encoder、Netty UDP Transport、TCP/TLS 可靠传输、四类 Transaction 状态机、Dialog Layer，以及 INVITE/ACK/re-INVITE/BYE/CANCEL 基本呼叫流程，并已具备 Digest、PRACK、Session Timer 和 INFO 的核心能力。统一 Stack API、完整事件框架和更多部署能力仍在后续规划中，因此当前版本暂不适合生产环境使用。
 
 ## 设计目标
 
@@ -33,7 +33,7 @@ LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协
 | PRACK / 100rel | 已实现（6D） | RSeq/RAck、可靠临时响应重传、PRACK 自动创建、Early Dialog 隔离和 420/481 错误语义 |
 | UPDATE / Session Timer | 已实现（6E） | UPDATE、Session-Expires/Min-SE、UAC/UAS 协商、generation-safe Timer、422 单次重试和刷新失败闭环 |
 | INFO / Extension Dispatch | 已实现（6F） | `Info-Package`、`Recv-Info`、线程安全 Handler 注册表、入站分派、469/481/500 语义和 `sendInfo` API 已完成；REFER 保持通用请求边界 |
-| 6G Scenario Testkit | 进行中（6G-A 已完成） | 测试专用 Endpoint、延迟绑定入站 Handler、双端 Transport 生命周期基座已完成；跨 Transport 组合场景待实现 |
+| 6G Transport Scenarios | 进行中（6G-A～6G-C 已完成） | 测试专用 Endpoint、真实 UDP/TCP/TLS Dialog + packaged INFO，以及 OPTIONS 的 Digest 401/重试/200 已完成；PRACK、Session Timer、并发与关闭场景待实现 |
 | Stack API | 后续规划 | 统一组件装配、配置和关闭顺序 |
 
 当前 `SipMessageParser` 接收一条已经完成边界识别的 SIP 报文。TCP 半包、粘包以及同一字节流中的多条消息，已经由 Transport stream decoder 完成分帧。
@@ -165,7 +165,7 @@ org.loomsip
 2. **事务层（已完成）**：Transaction ID、Mailbox、Dispatcher、四类状态机、Timer、ACK/CANCEL 关联规则。
 3. **Dialog 与基本呼叫（已完成）**：Early/Confirmed Dialog，以及 INVITE、ACK、re-INVITE、BYE、CANCEL 完整流程。
 4. **可靠传输（已完成，5A～5F）**：TCP/TLS 分帧、连接复用、TLS 握手、统一协议选择、失败传播、连接级资源限制和真实完整呼叫验收。
-5. **认证与 SIP 扩展（6A～6F、6G-A 已完成，6G-B～6G-F 待执行）**：请求尝试基础、UAC/UAS Digest、PRACK/100rel、UPDATE、Session Timer、INFO 完整分派和场景测试基座；后续进行跨 Transport 组合验收。
+5. **认证与 SIP 扩展（6A～6F、6G-A～6G-C 已完成，6G-D～6G-F 待执行）**：请求尝试基础、UAC/UAS Digest、PRACK/100rel、UPDATE、Session Timer、INFO 完整分派，以及跨 Transport 的 INFO 与 Digest 401/重试场景；后续进行 PRACK、Session Timer、并发和关闭验收。
 6. **扩展能力**：RFC 3263 DNS、WebSocket、Registrar/Proxy、测试工具、指标、追踪和诊断能力。
 
 ## 文档
