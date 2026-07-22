@@ -287,6 +287,10 @@ StackStateSnapshot
 
 已完成（2026-07-22）。新增 `StackStateSnapshot`、每 Transport 的 `StackTransportSnapshot` 与可选 `TransportDiagnostics`；快照包含生命周期、绑定端点、Transaction 活动计数、Netty 连接数、本地 pending send 数及不含敏感 SIP 内容的最后失败摘要。新增 `SipStackListener`，状态与失败通知经 Stack callback executor 异步投递，监听器异常被隔离。`snapshot()` 可在任意生命周期状态读取。
 
+### 8F 实施状态
+
+已完成（2026-07-22）。新增真实 UDP/TCP Stack 回环验收：Builder Factory 绑定临时端口，`SipClient` 发起 OPTIONS，入站请求经 Dispatcher/IST-NIST 到达 TU Handler 并返回 200。TCP/TLS 的连接与 TLS 握手底层验收继续复用既有 Netty 专项测试。
+
 ## 10. 验收标准
 
 - 应用无需直接构造 Transaction Manager、Dialog Manager、Subscription Manager 或 Dispatcher。
