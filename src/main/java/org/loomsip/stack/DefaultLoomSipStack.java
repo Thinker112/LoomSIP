@@ -1,7 +1,5 @@
 package org.loomsip.stack;
 
-import org.loomsip.transport.TransportRegistry;
-
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -13,8 +11,8 @@ import java.util.concurrent.TimeoutException;
  * Lifecycle-only Stack implementation used before protocol component assembly.
  *
  * <pre>{@code
- * start() --> TransportRegistry.start() --> RUNNING
- * close() --> TransportRegistry.close() --> StackResources.close() --> CLOSED
+ * start() --> StackTransportAssembly.start() --> RUNNING
+ * close() --> StackTransportAssembly.close() --> StackResources.close() --> CLOSED
  * }</pre>
  *
  * <p>The monitor serializes Stack state transitions. It intentionally holds
@@ -25,21 +23,48 @@ final class DefaultLoomSipStack implements LoomSipStack {
     private final Object monitor = new Object();
     private final SipStackConfig config;
     private final StackResources resources;
-    private final TransportRegistry transportRegistry;
+    private final StackTransportAssembly transportAssembly;
+    private final StackTransactionRuntime transactionRuntime;
+    private final SipClient client;
+    private final SipStackListener listener;
     private final CompletableFuture<Void> started = new CompletableFuture<>();
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private SipStackState state = SipStackState.NEW;
+    private volatile String lastFailure;
 
-    DefaultLoomSipStack(SipStackConfig config, StackResources resources, TransportRegistry transportRegistry) {
+    DefaultLoomSipStack(
+            SipStackConfig config,
+            StackResources resources,
+            StackTransportAssembly transportAssembly,
+            StackTransactionRuntime transactionRuntime,
+            SipStackListener listener
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.resources = Objects.requireNonNull(resources, "resources");
-        this.transportRegistry = Objects.requireNonNull(transportRegistry, "transportRegistry");
+        this.transportAssembly = Objects.requireNonNull(transportAssembly, "transportAssembly");
+        this.transactionRuntime = Objects.requireNonNull(transactionRuntime, "transactionRuntime");
+        this.client = new DefaultSipClient(
+                this::state, transactionRuntime.inviteTransactions(), transactionRuntime.nonInviteTransactions()
+        );
+        this.listener = Objects.requireNonNull(listener, "listener");
     }
 
     @Override
     public SipStackState state() {
         synchronized (monitor) {
             return state;
+        }
+    }
+
+    @Override
+    public SipClient client() {
+        return client;
+    }
+
+    @Override
+    public StackStateSnapshot snapshot() {
+        synchronized (monitor) {
+            return snapshotLocked();
         }
     }
 
@@ -51,13 +76,16 @@ final class DefaultLoomSipStack implements LoomSipStack {
                     state = SipStackState.STARTING;
                     try {
                         // Keep start and close mutually exclusive while transports bind synchronously.
-                        transportRegistry.start();
+                        transportAssembly.start();
                         state = SipStackState.RUNNING;
                         started.complete(null);
+                        notifyState(snapshotLocked());
                     } catch (Throwable cause) {
                         state = SipStackState.FAILED;
+                        lastFailure = summary(cause);
                         started.completeExceptionally(cause);
                         closeResourcesAfterStartFailure(cause);
+                        notifyFailure(snapshotLocked(), cause);
                     }
                 }
                 case STARTING, RUNNING -> { }
@@ -79,9 +107,18 @@ final class DefaultLoomSipStack implements LoomSipStack {
             state = SipStackState.CLOSING;
             RuntimeException failure = null;
             try {
-                transportRegistry.close();
+                transactionRuntime.close();
             } catch (RuntimeException exception) {
                 failure = exception;
+            }
+            try {
+                transportAssembly.close();
+            } catch (RuntimeException exception) {
+                if (failure == null) {
+                    failure = exception;
+                } else {
+                    failure.addSuppressed(exception);
+                }
             }
             try {
                 resources.close();
@@ -95,9 +132,12 @@ final class DefaultLoomSipStack implements LoomSipStack {
             if (failure == null) {
                 state = SipStackState.CLOSED;
                 closed.complete(null);
+                notifyState(snapshotLocked());
             } else {
                 state = SipStackState.FAILED;
+                lastFailure = summary(failure);
                 closed.completeExceptionally(failure);
+                notifyFailure(snapshotLocked(), failure);
             }
             return closed.minimalCompletionStage();
         }
@@ -122,9 +162,36 @@ final class DefaultLoomSipStack implements LoomSipStack {
 
     private void closeResourcesAfterStartFailure(Throwable startFailure) {
         try {
+            transactionRuntime.close();
+        } catch (RuntimeException closeFailure) {
+            startFailure.addSuppressed(closeFailure);
+        }
+        try {
             resources.close();
         } catch (RuntimeException closeFailure) {
             startFailure.addSuppressed(closeFailure);
         }
+    }
+
+    private StackStateSnapshot snapshotLocked() {
+        return transactionRuntime.snapshot(state, transportAssembly.snapshot(), java.util.Optional.ofNullable(lastFailure));
+    }
+
+    private void notifyState(StackStateSnapshot snapshot) {
+        notifyListener(() -> listener.onStateChanged(snapshot));
+    }
+
+    private void notifyFailure(StackStateSnapshot snapshot, Throwable cause) {
+        notifyListener(() -> listener.onFailure(snapshot, cause));
+    }
+
+    private void notifyListener(Runnable callback) {
+        try { resources.callbackExecutor().execute(() -> { try { callback.run(); } catch (Throwable ignored) { } }); }
+        catch (RuntimeException ignored) { }
+    }
+
+    private static String summary(Throwable failure) {
+        String message = failure.getMessage();
+        return failure.getClass().getSimpleName() + (message == null ? "" : ": " + message);
     }
 }

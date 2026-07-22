@@ -35,6 +35,16 @@ public interface LoomSipStack extends AutoCloseable {
     SipStackState state();
 
     /**
+     * Returns the state-gated facade for outgoing protocol commands.
+     *
+     * @return reusable client facade; commands require the RUNNING state
+     */
+    SipClient client();
+
+    /** @return immutable runtime diagnostic snapshot */
+    StackStateSnapshot snapshot();
+
+    /**
      * Starts owned transports exactly once.
      *
      * @return completion after every configured transport has started

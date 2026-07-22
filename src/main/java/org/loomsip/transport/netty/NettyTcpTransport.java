@@ -82,7 +82,7 @@ import java.util.concurrent.TimeUnit;
  * immutable messages and transport failures through the existing handler
  * boundary; stage 5D will translate connection failures into mailbox events.</p>
  */
-public class NettyTcpTransport implements SipTransport {
+public class NettyTcpTransport implements SipTransport, org.loomsip.transport.TransportDiagnostics {
 
     private static final System.Logger LOGGER = System.getLogger(NettyTcpTransport.class.getName());
     private static final long SHUTDOWN_TIMEOUT_SECONDS = 5;
@@ -623,6 +623,12 @@ public class NettyTcpTransport implements SipTransport {
     @Override
     public TransportState state() {
         return state;
+    }
+
+    @Override public org.loomsip.transport.TransportDiagnosticsSnapshot diagnostics() {
+        return new org.loomsip.transport.TransportDiagnosticsSnapshot(
+                connectionManager.activeConnectionCount(), pendingSends.size()
+        );
     }
 
     /**

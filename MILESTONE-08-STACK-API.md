@@ -271,6 +271,22 @@ StackStateSnapshot
 
 已完成（2026-07-21）。新增 `LoomSipStack`、单次使用的 Builder、不可变 `SipStackConfig`、`SipStackState` 和带显式资源所有权的 `StackResources`。当前生命周期骨架只接管 `TransportRegistry` 与 Stack 自建资源：`build()` 不绑定端口，`start()` 启动 Transport，启动失败进入 `FAILED` 并释放自有资源，`closeAsync()`/`close()` 幂等关闭 Transport 与自有资源。Transaction、Dialog 和 Subscription 的 Mailbox 所有权没有变化。
 
+### 8B 实施状态
+
+已完成（2026-07-22）。新增 `StackTransportFactory` 及 `NettyTransports.udp/tcp/tls(...)` 工厂；Builder 通过 `transport(protocol, factory)` 声明 Stack 自建 Transport，且仍支持转交外部 `TransportRegistry`，两种方式不可混用。Factory 在 `start()` 中才创建并注册 Transport，因此 `build()` 不会创建 Netty 资源或绑定端口；创建或启动失败时统一关闭 Registry，回滚已创建或已启动的 Transport，并使 Stack 进入 `FAILED`。
+
+### 8C 实施状态
+
+已完成（2026-07-22）。新增不可变 `IncomingRequestContext`、`IncomingRequestHandler`、启动后不可变的 `TuHandlerRegistry` 与 `TuServerTransactionBridge`。Builder 现创建共享资源上的 INVITE/Non-INVITE Transaction Manager，并将 Transport 入站 Handler 接入 `SipTransactionDispatcher`；Bridge 在既有有序 TU callback 中按 INVITE 或通用请求分派。Context 可发送任意数量的 `1xx`，但只接受一次最终响应。未注册能力返回 `501`，业务 Handler 异常被隔离并在尚未完成最终响应时返回 `500`。Dialog、Subscription 与扩展协议的自动桥接留待后续 Stack 阶段。
+
+### 8D 实施状态
+
+已完成（2026-07-22）。新增状态门控的 `SipClient`，提供 `request(OutgoingRequest)` 与 `invite(InviteRequest)`；调用方必须提供完整不可变请求与明确 `TransportEndpoint`，Stack 不推导网络目标。所有命令仅在 `RUNNING` 可提交，启动前、关闭中或关闭后立即抛出 `IllegalStateException`。INFO、REFER、初始 SUBSCRIBE 可通过通用 Non-INVITE 入口发送；需要 Dialog 或 Subscription 身份的类型化 API 在相应 Runtime 自动装配后实现。
+
+### 8E 实施状态
+
+已完成（2026-07-22）。新增 `StackStateSnapshot`、每 Transport 的 `StackTransportSnapshot` 与可选 `TransportDiagnostics`；快照包含生命周期、绑定端点、Transaction 活动计数、Netty 连接数、本地 pending send 数及不含敏感 SIP 内容的最后失败摘要。新增 `SipStackListener`，状态与失败通知经 Stack callback executor 异步投递，监听器异常被隔离。`snapshot()` 可在任意生命周期状态读取。
+
 ## 10. 验收标准
 
 - 应用无需直接构造 Transaction Manager、Dialog Manager、Subscription Manager 或 Dispatcher。

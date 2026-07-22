@@ -69,7 +69,7 @@ import java.util.concurrent.TimeUnit;
  * Outbound SipMessage --> Encoder --> ChannelFuture --> SendResult/Event
  * }</pre>
  */
-public final class NettyUdpTransport implements SipTransport {
+public final class NettyUdpTransport implements SipTransport, org.loomsip.transport.TransportDiagnostics {
 
     private static final System.Logger LOGGER = System.getLogger(NettyUdpTransport.class.getName());
     private static final long SHUTDOWN_TIMEOUT_SECONDS = 5;
@@ -278,6 +278,10 @@ public final class NettyUdpTransport implements SipTransport {
     @Override
     public TransportState state() {
         return state;
+    }
+
+    @Override public org.loomsip.transport.TransportDiagnosticsSnapshot diagnostics() {
+        return new org.loomsip.transport.TransportDiagnosticsSnapshot(0, pendingSends.size());
     }
 
     private void dispatchMessage(InboundSipMessage message) {

@@ -1,7 +1,10 @@
 package org.loomsip.stack;
 
 import org.loomsip.transport.TransportRegistry;
+import org.loomsip.transport.TransportProtocol;
 
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -20,6 +23,10 @@ public final class LoomSipStackBuilder {
     private SipStackConfig config = SipStackConfig.DEFAULT;
     private StackResources resources;
     private TransportRegistry transportRegistry;
+    private TuHandlerRegistry handlers = TuHandlerRegistry.builder().build();
+    private SipStackListener listener = new SipStackListener() { };
+    private final EnumMap<TransportProtocol, StackTransportFactory> transportFactories =
+            new EnumMap<>(TransportProtocol.class);
     private boolean built;
 
     /** Creates a builder with default lifecycle configuration. */
@@ -64,8 +71,54 @@ public final class LoomSipStackBuilder {
      */
     public LoomSipStackBuilder transportRegistry(TransportRegistry transportRegistry) {
         ensureMutable();
+        if (!transportFactories.isEmpty()) {
+            throw new IllegalStateException("cannot combine a transport registry with transport factories");
+        }
         this.transportRegistry = Objects.requireNonNull(transportRegistry, "transportRegistry");
         return this;
+    }
+
+    /**
+     * Registers one Stack-owned Transport factory for a protocol.
+     *
+     * <p>Factory invocation is deferred to {@link LoomSipStack#start()}, so
+     * {@link #build()} neither binds a port nor creates Netty resources.</p>
+     *
+     * @param protocol protocol supplied by the factory
+     * @param factory factory that creates the matching unstarted Transport
+     * @return this builder
+     * @throws IllegalStateException if a Registry was supplied, a Factory for the
+     *                               protocol already exists, or build has run
+     */
+    public LoomSipStackBuilder transport(TransportProtocol protocol, StackTransportFactory factory) {
+        ensureMutable();
+        if (transportRegistry != null) {
+            throw new IllegalStateException("cannot combine transport factories with a transport registry");
+        }
+        Objects.requireNonNull(protocol, "protocol");
+        Objects.requireNonNull(factory, "factory");
+        if (transportFactories.putIfAbsent(protocol, factory) != null) {
+            throw new IllegalArgumentException("transport factory already registered for " + protocol);
+        }
+        return this;
+    }
+
+    /**
+     * Supplies the immutable inbound Transaction User routing table.
+     *
+     * @param handlers startup-time request handler registrations
+     * @return this builder
+     * @throws IllegalStateException if build has already been called
+     */
+    public LoomSipStackBuilder handlers(TuHandlerRegistry handlers) {
+        ensureMutable();
+        this.handlers = Objects.requireNonNull(handlers, "handlers");
+        return this;
+    }
+
+    /** @param listener isolated lifecycle and failure observer @return this builder */
+    public LoomSipStackBuilder listener(SipStackListener listener) {
+        ensureMutable(); this.listener = Objects.requireNonNull(listener, "listener"); return this;
     }
 
     /**
@@ -77,10 +130,18 @@ public final class LoomSipStackBuilder {
     public LoomSipStack build() {
         ensureMutable();
         built = true;
+        StackResources actualResources = resources == null ? StackResources.createDefault() : resources;
+        TransportRegistry actualRegistry = transportRegistry == null ? new TransportRegistry() : transportRegistry;
+        StackTransactionRuntime transactionRuntime = new StackTransactionRuntime(
+                actualRegistry, actualResources, handlers
+        );
         return new DefaultLoomSipStack(
                 config,
-                resources == null ? StackResources.createDefault() : resources,
-                transportRegistry == null ? new TransportRegistry() : transportRegistry
+                actualResources,
+                new StackTransportAssembly(
+                        actualRegistry, Map.copyOf(transportFactories), transactionRuntime.dispatcher()
+                ),
+                transactionRuntime, listener
         );
     }
 

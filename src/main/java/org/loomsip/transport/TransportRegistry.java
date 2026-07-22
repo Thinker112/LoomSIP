@@ -73,7 +73,7 @@ public final class TransportRegistry implements AutoCloseable {
             if (started) {
                 throw new TransportException("transport registry has already started");
             }
-            snapshot = Map.copyOf(transports);
+            snapshot = new EnumMap<>(transports);
             started = true;
         }
         try {
@@ -169,7 +169,7 @@ public final class TransportRegistry implements AutoCloseable {
                 return;
             }
             closed = true;
-            snapshot = Map.copyOf(transports);
+            snapshot = new EnumMap<>(transports);
         }
         closeTransports(snapshot);
     }

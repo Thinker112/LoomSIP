@@ -2,6 +2,10 @@ package org.loomsip.stack;
 
 import org.junit.jupiter.api.Test;
 import org.loomsip.message.SipMessage;
+import org.loomsip.message.SipHeaders;
+import org.loomsip.message.SipMethod;
+import org.loomsip.message.SipRequest;
+import org.loomsip.message.SipUri;
 import org.loomsip.transaction.timer.Cancellable;
 import org.loomsip.transaction.timer.SipScheduler;
 import org.loomsip.transport.SendResult;
@@ -16,8 +20,10 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -98,6 +104,122 @@ class LoomSipStackTest {
         } finally {
             stack.close();
         }
+    }
+
+    @Test
+    void createsConfiguredFactoriesOnlyWhenStackStarts() {
+        RecordingTransport udp = new RecordingTransport(false);
+        RecordingTransport tcp = new RecordingTransport(false);
+        AtomicInteger udpFactoryCalls = new AtomicInteger();
+        AtomicInteger tcpFactoryCalls = new AtomicInteger();
+        LoomSipStack stack = LoomSipStack.builder()
+                .transport(TransportProtocol.UDP, ignored -> {
+                    udpFactoryCalls.incrementAndGet();
+                    return udp;
+                })
+                .transport(TransportProtocol.TCP, ignored -> {
+                    tcpFactoryCalls.incrementAndGet();
+                    return tcp;
+                })
+                .build();
+        try {
+            assertEquals(0, udpFactoryCalls.get());
+            assertEquals(0, tcpFactoryCalls.get());
+
+            stack.start().toCompletableFuture().join();
+
+            assertEquals(1, udpFactoryCalls.get());
+            assertEquals(1, tcpFactoryCalls.get());
+            assertEquals(1, udp.starts.get());
+            assertEquals(1, tcp.starts.get());
+        } finally {
+            stack.close();
+        }
+        assertEquals(1, udp.closes.get());
+        assertEquals(1, tcp.closes.get());
+    }
+
+    @Test
+    void closesCreatedTransportWhenLaterFactoryFails() {
+        RecordingTransport udp = new RecordingTransport(false);
+        LoomSipStack stack = LoomSipStack.builder()
+                .transport(TransportProtocol.UDP, ignored -> udp)
+                .transport(TransportProtocol.TCP, ignored -> {
+                    throw new IllegalStateException("test factory failure");
+                })
+                .build();
+
+        assertThrows(java.util.concurrent.CompletionException.class, () -> stack.start().toCompletableFuture().join());
+
+        assertEquals(SipStackState.FAILED, stack.state());
+        assertEquals(0, udp.starts.get());
+        assertEquals(1, udp.closes.get());
+        stack.close();
+        assertEquals(SipStackState.CLOSED, stack.state());
+        assertEquals(1, udp.closes.get());
+    }
+
+    @Test
+    void rejectsMixingFactoriesWithTransferredRegistry() {
+        TransportRegistry registry = new TransportRegistry();
+        assertThrows(IllegalStateException.class, () -> LoomSipStack.builder()
+                .transportRegistry(registry)
+                .transport(TransportProtocol.UDP, ignored -> new RecordingTransport(false)));
+        assertThrows(IllegalStateException.class, () -> LoomSipStack.builder()
+                .transport(TransportProtocol.UDP, ignored -> new RecordingTransport(false))
+                .transportRegistry(registry));
+    }
+
+    @Test
+    void clientAcceptsCommandsOnlyWhileStackIsRunning() throws Exception {
+        RecordingTransport transport = new RecordingTransport(false);
+        TransportRegistry registry = new TransportRegistry();
+        registry.register(TransportProtocol.UDP, transport);
+        LoomSipStack stack = LoomSipStack.builder().transportRegistry(registry).build();
+        OutgoingRequest request = new OutgoingRequest(optionsRequest(), TransportEndpoint.udp(
+                new InetSocketAddress(InetAddress.getLoopbackAddress(), 5070)
+        ));
+
+        assertThrows(IllegalStateException.class, () -> stack.client().request(request));
+        stack.start().toCompletableFuture().join();
+        assertEquals(optionsRequest(), stack.client().request(request).originalRequest());
+        stack.close();
+        assertThrows(IllegalStateException.class, () -> stack.client().request(request));
+    }
+
+    @Test
+    void snapshotAndFailingListenerDoNotBlockLifecycle() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        RecordingScheduler scheduler = new RecordingScheduler();
+        AtomicInteger states = new AtomicInteger();
+        CountDownLatch observed = new CountDownLatch(1);
+        LoomSipStack stack = LoomSipStack.builder()
+                .resources(StackResources.external(executor, scheduler))
+                .listener(new SipStackListener() {
+                    @Override public void onStateChanged(StackStateSnapshot snapshot) {
+                        states.incrementAndGet(); observed.countDown(); throw new IllegalStateException("listener failure");
+                    }
+                }).build();
+        try {
+            stack.start().toCompletableFuture().join();
+            assertEquals(SipStackState.RUNNING, stack.snapshot().state());
+            stack.close();
+            assertTrue(observed.await(1, TimeUnit.SECONDS));
+            assertEquals(SipStackState.CLOSED, stack.snapshot().state());
+            assertTrue(states.get() >= 1);
+        } finally {
+            executor.shutdownNow(); scheduler.close();
+        }
+    }
+
+    private static SipRequest optionsRequest() {
+        return new SipRequest(SipMethod.OPTIONS, SipUri.parse("sip:service@example.com"), SipHeaders.builder()
+                .add("Via", "SIP/2.0/UDP client.example.com;branch=z9hG4bK-stack-client")
+                .add("From", "<sip:client@example.com>;tag=caller")
+                .add("To", "<sip:service@example.com>")
+                .add("Call-ID", "stack-client@example.com")
+                .add("CSeq", "1 OPTIONS")
+                .build());
     }
 
     private static final class RecordingTransport implements SipTransport {
