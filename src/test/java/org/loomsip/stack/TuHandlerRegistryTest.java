@@ -85,6 +85,19 @@ class TuHandlerRegistryTest {
         assertEquals(200, options.response.get().statusCode());
     }
 
+    @Test
+    void isolatesFailingErrorReporterAndStillSendsFallbackResponse() throws Exception {
+        TuHandlerRegistry registry = TuHandlerRegistry.builder()
+                .requestHandler(context -> { throw new IllegalStateException("handler failure"); })
+                .build();
+        AtomicReference<SipResponse> response = new AtomicReference<>();
+
+        registry.dispatch(new IncomingRequestContext(request(SipMethod.OPTIONS), context(), response::set),
+                failure -> { throw new IllegalStateException("observer failure"); });
+
+        assertEquals(500, response.get().statusCode());
+    }
+
     private static SipRequest request(SipMethod method) {
         return new SipRequest(method, SipUri.parse("sip:service@example.com"), SipHeaders.builder()
                 .add("Via", "SIP/2.0/UDP client.example.com;branch=z9hG4bK-stack")

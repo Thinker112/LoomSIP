@@ -34,7 +34,7 @@ LoomSIP 是一个面向 JDK 21 的现代 SIP（Session Initiation Protocol）协
 | UPDATE / Session Timer | 已实现（6E） | UPDATE、Session-Expires/Min-SE、UAC/UAS 协商、generation-safe Timer、422 单次重试和刷新失败闭环 |
 | INFO / Extension Dispatch | 已实现（6F） | `Info-Package`、`Recv-Info`、线程安全 Handler 注册表、入站分派、469/481/500 语义和 `sendInfo` API 已完成；REFER 保持通用请求边界 |
 | 6G Transport Scenarios | 已完成（6G-A～6G-F） | 测试专用 Endpoint、真实 UDP/TCP/TLS Dialog + INFO、Digest 401/重试、PRACK、Session Timer，以及 Exchange/Dialog/Transaction/Endpoint 的关闭与迟到事件收敛验收 |
-| Stack API | 已完成（8A～8F） | 生命周期、资源所有权、Netty Factory、TU 入站、状态门控 SipClient、快照、监听器及 UDP/TCP Stack 验收 |
+| Stack API | 已实现并扩展 | 生命周期、资源所有权、Netty Factory、TU 入站、SipClient、快照、Dialog/INFO/Subscription/REFER 自动装配及真实 UDP/TCP 验收；TLS Stack 业务验收待补充 |
 
 当前 `SipMessageParser` 接收一条已经完成边界识别的 SIP 报文。TCP 半包、粘包以及同一字节流中的多条消息，已经由 Transport stream decoder 完成分帧。
 

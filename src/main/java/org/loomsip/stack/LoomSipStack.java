@@ -44,6 +44,11 @@ public interface LoomSipStack extends AutoCloseable {
     /** @return immutable runtime diagnostic snapshot */
     StackStateSnapshot snapshot();
 
+    /** @return Dialog owner when Dialog Stack support was configured */
+    java.util.Optional<org.loomsip.dialog.DialogManager> dialogs();
+    /** @return Subscription owner when application subscription packages were configured */
+    java.util.Optional<org.loomsip.subscription.SubscriptionManager> subscriptions();
+
     /**
      * Starts owned transports exactly once.
      *

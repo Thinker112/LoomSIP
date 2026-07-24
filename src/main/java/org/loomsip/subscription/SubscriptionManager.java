@@ -126,6 +126,11 @@ public final class SubscriptionManager implements AutoCloseable {
         return subscriptions.size();
     }
 
+    /** @return immutable snapshots of all manager-owned Subscriptions */
+    public java.util.List<SubscriptionSnapshot> snapshots() {
+        return subscriptions.values().stream().map(Subscription::snapshot).toList();
+    }
+
     /** Terminates every Subscription and rejects later creation. */
     @Override
     public void close() {

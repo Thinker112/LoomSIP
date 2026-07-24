@@ -212,6 +212,31 @@ class LoomSipStackTest {
         }
     }
 
+    @Test
+    void createsOptionalDialogRuntimeFromExplicitConfiguration() {
+        DialogStackConfig dialog = new DialogStackConfig(
+                org.loomsip.dialog.DialogRequestProfile.udp(
+                        new org.loomsip.message.header.SentBy("127.0.0.1", 5060)),
+                (uri, protocol) -> CompletableFuture.failedFuture(new IllegalStateException("not used")),
+                org.loomsip.dialog.DialogConfig.DEFAULT,
+                new org.loomsip.dialog.DialogLifecycleListener() { }
+        );
+        LoomSipStack stack = LoomSipStack.builder().dialog(dialog)
+                .transport(TransportProtocol.UDP, ignored -> new RecordingTransport(false)).build();
+        try {
+            assertTrue(stack.dialogs().isPresent());
+        } finally {
+            stack.close();
+        }
+        assertThrows(IllegalArgumentException.class, () -> new DialogStackConfig(
+                org.loomsip.dialog.DialogRequestProfile.udp(
+                        new org.loomsip.message.header.SentBy("127.0.0.1", 0)),
+                (uri, protocol) -> CompletableFuture.failedFuture(new IllegalStateException("not used")),
+                org.loomsip.dialog.DialogConfig.DEFAULT,
+                new org.loomsip.dialog.DialogLifecycleListener() { }
+        ));
+    }
+
     private static SipRequest optionsRequest() {
         return new SipRequest(SipMethod.OPTIONS, SipUri.parse("sip:service@example.com"), SipHeaders.builder()
                 .add("Via", "SIP/2.0/UDP client.example.com;branch=z9hG4bK-stack-client")

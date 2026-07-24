@@ -2,6 +2,7 @@ package org.loomsip.transport.netty;
 
 import org.loomsip.codec.SipParserLimits;
 import org.loomsip.stack.StackTransportFactory;
+import org.loomsip.transport.TransportProtocol;
 
 import java.util.Objects;
 
@@ -37,7 +38,7 @@ public final class NettyTransports {
     public static StackTransportFactory udp(UdpTransportConfig config, SipParserLimits parserLimits) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(parserLimits, "parserLimits");
-        return handler -> new NettyUdpTransport(config, parserLimits, handler);
+        return factory(TransportProtocol.UDP, config.bindAddress(), handler -> new NettyUdpTransport(config, parserLimits, handler));
     }
 
     /**
@@ -60,7 +61,7 @@ public final class NettyTransports {
     public static StackTransportFactory tcp(TcpTransportConfig config, SipParserLimits parserLimits) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(parserLimits, "parserLimits");
-        return handler -> new NettyTcpTransport(config, parserLimits, handler);
+        return factory(TransportProtocol.TCP, config.bindAddress(), handler -> new NettyTcpTransport(config, parserLimits, handler));
     }
 
     /**
@@ -83,6 +84,16 @@ public final class NettyTransports {
     public static StackTransportFactory tls(TlsTransportConfig config, SipParserLimits parserLimits) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(parserLimits, "parserLimits");
-        return handler -> new NettyTlsTransport(config, parserLimits, handler);
+        return factory(TransportProtocol.TLS, config.bindAddress(), handler -> new NettyTlsTransport(config, parserLimits, handler));
+    }
+
+    private static StackTransportFactory factory(org.loomsip.transport.TransportProtocol protocol,
+                                                  java.net.InetSocketAddress bindAddress,
+                                                  StackTransportFactory delegate) {
+        return new StackTransportFactory() {
+            @Override public org.loomsip.transport.SipTransport create(org.loomsip.transport.SipMessageHandler handler) { return delegate.create(handler); }
+            @Override public java.util.Optional<org.loomsip.transport.TransportProtocol> protocol() { return java.util.Optional.of(protocol); }
+            @Override public java.util.Optional<java.net.InetSocketAddress> bindAddress() { return java.util.Optional.of(bindAddress); }
+        };
     }
 }

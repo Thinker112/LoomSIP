@@ -25,6 +25,8 @@ public final class LoomSipStackBuilder {
     private TransportRegistry transportRegistry;
     private TuHandlerRegistry handlers = TuHandlerRegistry.builder().build();
     private SipStackListener listener = new SipStackListener() { };
+    private DialogStackConfig dialogConfig;
+    private SipStackApplication application;
     private final EnumMap<TransportProtocol, StackTransportFactory> transportFactories =
             new EnumMap<>(TransportProtocol.class);
     private boolean built;
@@ -116,9 +118,22 @@ public final class LoomSipStackBuilder {
         return this;
     }
 
+    /** Supplies frozen capability-based application registrations. */
+    public LoomSipStackBuilder application(SipStackApplication application) {
+        ensureMutable();
+        this.application = Objects.requireNonNull(application, "application");
+        this.handlers = application.requests();
+        return this;
+    }
+
     /** @param listener isolated lifecycle and failure observer @return this builder */
     public LoomSipStackBuilder listener(SipStackListener listener) {
         ensureMutable(); this.listener = Objects.requireNonNull(listener, "listener"); return this;
+    }
+
+    /** Enables automatic Dialog Runtime and Transaction Bridge assembly. */
+    public LoomSipStackBuilder dialog(DialogStackConfig dialogConfig) {
+        ensureMutable(); this.dialogConfig = Objects.requireNonNull(dialogConfig, "dialogConfig"); return this;
     }
 
     /**
@@ -129,11 +144,12 @@ public final class LoomSipStackBuilder {
      */
     public LoomSipStack build() {
         ensureMutable();
+        validateDialogTransport();
         built = true;
         StackResources actualResources = resources == null ? StackResources.createDefault() : resources;
         TransportRegistry actualRegistry = transportRegistry == null ? new TransportRegistry() : transportRegistry;
         StackTransactionRuntime transactionRuntime = new StackTransactionRuntime(
-                actualRegistry, actualResources, handlers
+                actualRegistry, actualResources, application, handlers, dialogConfig
         );
         return new DefaultLoomSipStack(
                 config,
@@ -143,6 +159,16 @@ public final class LoomSipStackBuilder {
                 ),
                 transactionRuntime, listener
         );
+    }
+
+    private void validateDialogTransport() {
+        if (dialogConfig == null) return;
+        StackTransportFactory factory = transportFactories.get(dialogConfig.requestProfile().preferredTransport());
+        if (factory == null) throw new IllegalStateException("Dialog transport is not configured: " + dialogConfig.requestProfile().preferredTransport());
+        factory.bindAddress().ifPresent(address -> {
+            if (address.getPort() == 0) throw new IllegalArgumentException("Stack Dialog transport bind port must not be zero");
+            if (address.getPort() != dialogConfig.requestProfile().sentBy().port()) throw new IllegalArgumentException("Dialog sent-by port must match transport bind port");
+        });
     }
 
     private void ensureMutable() {

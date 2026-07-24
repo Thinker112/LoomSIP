@@ -2,6 +2,10 @@ package org.loomsip.stack;
 
 import org.loomsip.transport.SipMessageHandler;
 import org.loomsip.transport.SipTransport;
+import org.loomsip.transport.TransportProtocol;
+
+import java.net.InetSocketAddress;
+import java.util.Optional;
 
 /**
  * Creates one Stack-owned Transport after its inbound dispatch target exists.
@@ -23,4 +27,10 @@ public interface StackTransportFactory {
      * @return unstarted Transport; ownership transfers to the Stack
      */
     SipTransport create(SipMessageHandler inboundHandler);
+
+    /** @return declared protocol when the Factory exposes static transport metadata */
+    default Optional<TransportProtocol> protocol() { return Optional.empty(); }
+
+    /** @return declared bind address when the Factory exposes static transport metadata */
+    default Optional<InetSocketAddress> bindAddress() { return Optional.empty(); }
 }

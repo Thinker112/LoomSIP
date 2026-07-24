@@ -69,6 +69,12 @@ final class DefaultLoomSipStack implements LoomSipStack {
     }
 
     @Override
+    public java.util.Optional<org.loomsip.dialog.DialogManager> dialogs() {
+        return transactionRuntime.dialogs();
+    }
+    @Override public java.util.Optional<org.loomsip.subscription.SubscriptionManager> subscriptions() { return transactionRuntime.subscriptions(); }
+
+    @Override
     public CompletionStage<Void> start() {
         synchronized (monitor) {
             switch (state) {

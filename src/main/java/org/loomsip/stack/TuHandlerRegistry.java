@@ -44,7 +44,11 @@ public final class TuHandlerRegistry {
             (SipMethod.INVITE.equals(context.request().method()) ? inviteHandler : requestHandler)
                     .onRequest(context);
         } catch (Throwable failure) {
-            failureReporter.accept(failure);
+            try {
+                failureReporter.accept(failure);
+            } catch (Throwable ignored) {
+                // Observability must not prevent the Transaction from receiving its fallback response.
+            }
             if (!context.hasResponded()) {
                 context.respond(SipResponses.createResponse(context.request(), 500, "Server Internal Error"));
             }

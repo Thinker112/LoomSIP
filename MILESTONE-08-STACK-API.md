@@ -291,6 +291,22 @@ StackStateSnapshot
 
 已完成（2026-07-22）。新增真实 UDP/TCP Stack 回环验收：Builder Factory 绑定临时端口，`SipClient` 发起 OPTIONS，入站请求经 Dispatcher/IST-NIST 到达 TU Handler 并返回 200。TCP/TLS 的连接与 TLS 握手底层验收继续复用既有 Netty 专项测试。
 
+## 9. Dialog Stack 自动装配
+
+Stack 可选接收 `DialogStackConfig`。配置必须显式给出非零 `sent-by` 端口、Dialog Request Profile、目标解析器、容量和生命周期 listener；Stack 不从 SIP URI 猜测网络目标。启用后，Builder 自动创建 `DialogRuntime`、`DialogManager` 与 `DialogTransactionBridge`，并将 Bridge 的四类 listener 注入 Transaction Manager。关闭顺序为 Dialog Manager、Transaction Manager、Transport、Scheduler/Executor。
+
+`LoomSipStack.dialogs()` 返回可选的 `DialogManager`，仅在 Builder 配置 Dialog 后存在；应用通过 `DialogLifecycleListener` 获取实际建立的 Dialog，而非假设每个 INVITE 都只会产生一个 Dialog。
+
+## 10. 按能力注册的应用 API
+
+`SipStackApplication` 在启动前冻结注册：`inviteHandler`、`requestHandler`、`infoPackage`、`subscriptionPackage`、`referHandler`、`referSubscriptionListener` 与 `errorListener`。INFO 使用规范化 package 名作为 key；Subscription 使用完整 `EventHeaderValue`（含可选 event-id）作为 key。当前通用请求 Handler 已接入 TU Registry；配置 Dialog 时，INFO package 自动注册至 `InfoDispatcher` 并由 `DialogTransactionBridge` 路由。Subscription package 自动装配 UAS SUBSCRIBE Router；REFER Handler 自动装配 `ReferServerListener` 并复用 Stack 的 SubscriptionManager。
+
+当应用配置 `SipStackApplication` 时，Stack 还自动创建 `SubscriptionNotifyRouter`，使入站 NOTIFY 在 REFER/SUBSCRIBE/Dialog 通用路由之前按 Subscription identity 处理并返回 200、400 或 481。
+
+Stack 同时以 `SubscriptionSubscribeClientListener` 包装 Non-INVITE client listener；初始 SUBSCRIBE 2xx 经 `SubscriptionSubscribeResponseRouter` 创建 UAC pending Subscription，后续 NOTIFY 负责状态转换。
+
+实施状态（2026-07-24）：Stack 已自动装配 Dialog、INFO、Subscription 与 REFER 的核心入站链路。真实 UDP Stack 验收覆盖初始 INVITE 2xx 创建 Confirmed Dialog、Dialog 内 INFO 分派、BYE 清理、终止后旧 DialogHandle 拒绝 INFO，以及 SUBSCRIBE 2xx 创建 pending Subscription、NOTIFY active/terminated 和迟到 NOTIFY 不重建 identity。Dialog Stack 使用固定且与 `sent-by` 一致的监听端口；`StackTransportFactory` 对 Netty Factory 暴露可选 bind metadata，Builder 在启用 Dialog 时校验协议和端口约束。
+
 ## 10. 验收标准
 
 - 应用无需直接构造 Transaction Manager、Dialog Manager、Subscription Manager 或 Dispatcher。
